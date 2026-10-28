@@ -10,7 +10,7 @@ from PySide6 import QtWidgets,QtGui
 from uart_buzzer.desktop.app import MainWindow,VERSION
 from uart_buzzer.desktop.library import LibraryStore
 
-app=QtWidgets.QApplication([]);app.setStyle('Fusion');app.setFont(QtGui.QFont('Microsoft YaHei UI',9));out=ROOT/'results/library_qa_v131';out.mkdir(exist_ok=True)
+app=QtWidgets.QApplication([]);app.setStyle('Fusion');app.setFont(QtGui.QFont('Microsoft YaHei UI',9));out=ROOT/'results/library_qa_v131';out.mkdir(parents=True,exist_ok=True)
 (ROOT/'tmp').mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(dir=ROOT/'tmp') as folder:
     root=Path(folder);audio=root/'songs';audio.mkdir()
