@@ -1,0 +1,7 @@
+BUZZER_SS normalized impedance sweep
+* Run from spice/netlists. AC 1 A is a normalization, not a DUT stimulus.
+.include ../models/buzzer_ss.lib
+Itest 0 IN DC 0 AC 1
+Xbuzzer IN 0 BUZZER_SS
+.ac lin 1981 100 10000
+.end

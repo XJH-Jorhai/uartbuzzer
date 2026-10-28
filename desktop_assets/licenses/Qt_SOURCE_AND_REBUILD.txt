@@ -1,0 +1,6 @@
+Qt/PySide6 binaries are unmodified.
+Qt/PySide6 license option used: LGPL-3.0-only. Full LGPLv3 and GPLv3 texts accompany this distribution.
+Qt source: https://code.qt.io/cgit/qt/qtbase.git/?h=v6.12.0
+PySide6/shiboken source: https://code.qt.io/cgit/pyside/pyside-setup.git/?h=v6.12.0
+Application source and rebuild instructions: UARTAudioStudio-source.zip and docs/desktop_app.md.
+For replacing Qt/PySide DLLs, use the portable-directory build; preserve compatible ABI and paths in _internal.

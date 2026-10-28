@@ -1,0 +1,12 @@
+* TH2851 small-signal seed model; 2026-10-28
+* Rcu measured DCR (temperature unknown); all other values provisional.
+* Not jointly refitted to the fine sweep. No saturation or acoustic calibration.
+.SUBCKT BUZZER_SS IN OUT
+Rcu    IN N1   40.804
+Linf   N1 N2   2.262m
+Leddy  N2 N3   1.958m
+Reddy  N2 N3   92.06
+Rmot   N3 OUT  40.69
+Lmot   N3 OUT  142.3u
+Cmot   N3 OUT  38.26u
+.ENDS BUZZER_SS

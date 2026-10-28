@@ -1,0 +1,17 @@
+{
+  "status": "initial_analysis_only",
+  "voltage_v": 5,
+  "resistance_ohm": 42,
+  "resistance_range_ohm": [37, 47],
+  "resonance_hz": 2000,
+  "inductance_h": null,
+  "thermal_resistance_k_per_w": null,
+  "thermal_time_constant_s": null,
+  "required_spl_db": null,
+  "measurement_distance_m": null,
+  "play_duration_s": null,
+  "vio_v": null,
+  "uart_format": "8N1",
+  "baud": null,
+  "hardware_send_enabled": false
+}
