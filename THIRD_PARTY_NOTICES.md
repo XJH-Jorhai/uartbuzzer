@@ -19,3 +19,9 @@ is not bundled with the application.
 Original papers, author archives, NC-licensed references, commercial songs,
 microphone captures and research ZIPs containing these are excluded from the
 initial repository and public release assets.
+
+Public Windows builds collect the standard PortAudio library used for
+MME/DirectSound/WDM/WASAPI, excluding the unused ASIO-enabled variant. Additional
+Python, PortAudio, OpenSSL, libffi, expat and zlib notices and their upstream
+source URLs are retained in `desktop_assets/licenses/`. Rebuild with the supplied
+`scripts/hooks/hook-sounddevice.py`; retain those notices when redistributing.

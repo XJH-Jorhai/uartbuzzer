@@ -1,0 +1,27 @@
+[
+  {
+    "file": "PortAudio_LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/PortAudio/portaudio/master/LICENSE.txt",
+    "sha256": "ec52a1952d701f94e5135719a47376da4ee0b4a0201f1cafb49f61db6480ac3d"
+  },
+  {
+    "file": "OpenSSL_LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/openssl/openssl/openssl-3.0/LICENSE.txt",
+    "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+  },
+  {
+    "file": "libffi_LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/libffi/libffi/master/LICENSE",
+    "sha256": "17b64dc60f3b6897a60f971e288b973f655c2edcdf08b25f3c3dd5549857881c"
+  },
+  {
+    "file": "expat_COPYING.txt",
+    "source": "https://raw.githubusercontent.com/libexpat/libexpat/master/expat/COPYING",
+    "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87"
+  },
+  {
+    "file": "zlib_LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/madler/zlib/master/LICENSE",
+    "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+  }
+]

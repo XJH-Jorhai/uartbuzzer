@@ -43,6 +43,7 @@ cmd=[str(ROOT/'desktop_app.py'),'--name','UARTAudioStudio','--windowed','--noupx
      '--add-data',str(ROOT/'desktop_assets')+os.pathsep+'desktop_assets',
      '--hidden-import','serial.tools.list_ports_windows','--hidden-import','serial.serialwin32',
      '--hidden-import','_cffi_backend']
+if (ROOT/'scripts/hooks').is_dir():cmd+=['--additional-hooks-dir',str(ROOT/'scripts/hooks')]
 for f in ('src','tmp/sim_deps','tmp/gui_deps','tmp/audio_deps'):
     cmd+=['--paths',str(ROOT/f)]
 for name in ('matplotlib','pandas','IPython','jupyter','pytest','tkinter','PyQt5','PyQt6','PySide6.QtQml','PySide6.QtQuick','PySide6.QtWebEngineCore','OpenGL','numba'):
