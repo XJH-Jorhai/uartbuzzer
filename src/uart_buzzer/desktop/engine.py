@@ -44,8 +44,12 @@ def validate_profile(profile):
     bias=float(p.get('bias',.3));amplitude=float(p.get('amplitude',.18))
     if not (amplitude>0 and .1<=bias-amplitude and bias+amplitude<=.9):raise ValueError('配置超出UART密度范围')
     p['bias']=bias;p['amplitude']=amplitude;p['gains_db']=gains.tolist();p.setdefault('encoder','bit_feedback_uart_v1')
-    if p.get('encoder','bit_feedback_uart_v1') not in ('bit_feedback_uart_v1','frame_density_feedback','frame_aware_sigma_delta','edge_feedback_uart_v1','beam_fast','beam_quality','beam_research'):
+    if p.get('encoder','bit_feedback_uart_v1') not in ('bit_feedback_uart_v1','frame_density_feedback','frame_aware_sigma_delta','edge_feedback_uart_v1','beam_fast','beam_quality','beam_research','discrete_score'):
         raise ValueError('未知编码器')
+    if p['encoder']=='discrete_score':
+        from ..score.pipeline import settings
+        p['score_config']=settings(p.get('score_config'));p['prepared_volume']=float(p.get('prepared_volume',.8))
+        if not np.isfinite(p['prepared_volume']) or not 0<=p['prepared_volume']<=1:raise ValueError('曲谱音量无效')
     if p['encoder'].startswith('beam_'):
         from ..beam import settings_for,LEGACY_MODES
         from dataclasses import asdict
@@ -81,6 +85,14 @@ def convert(path,profile,mode='music',fit_path=None,progress=None,cancel_check=N
     else:x=np.asarray(source,float)
     if len(x)<FS*.1:raise ValueError('音频至少需要0.1秒')
     if len(x)>FS*600:raise ValueError('此版本支持最长10分钟WAV，请先裁剪更长文件')
+    if p['encoder']=='discrete_score':
+        from ..score.pipeline import convert as convert_score
+        result=convert_score(x,p['score_config'],p['baud'],p['prepared_volume'],p['bias'],p['amplitude'],progress,cancel_check)
+        metadata=dict(mode='discrete_score',source_PCM_sha256=hashlib.sha256(np.asarray(x,dtype=np.float32).tobytes()).hexdigest(),
+            total_bytes=sum(len(s['data']) for s in result['segments']),sample_rate_Hz=FS,score=result['score'],transport_plan=result['transport_plan'],
+            conditioning=dict(kind='raw_source_before_legacy_EQ'),predistortion=dict(enabled=False),
+            reconstruction='UART frame density + low-pass; not physical SPL',encoding=dict(encoder='discrete_score',format='8N1',baud=p['baud']))
+        return AudioDocument(name or Path(path).name,str(path),x.astype(np.float32),result['processed'],result['decoded'],result['segments'],p,metadata)
     if progress:progress(.05)
     if mode=='electrical':
         gains,model=electrical_equalizer(fit_path)
@@ -184,18 +196,18 @@ class LiveEncoder:
 class PrecomputedEncoder:
     """Thin adapter to the existing playback protocol, with fixed prepared volume."""
     def __init__(self,document):
-        self.doc=document;self.p=document.profile;self.volume=float(self.p['beam_volume'])
-        if not document.metadata.get('beam'):raise ValueError('Beam离线字节尚未完成')
+        self.doc=document;self.p=document.profile;self.volume=float(self.p.get('prepared_volume',self.p.get('beam_volume',1.)))
+        if not (document.metadata.get('beam') or document.metadata.get('score')):raise ValueError('离线字节尚未完成')
         self.bounds=[(round(s['start_s']*self.p['baud']/10),s) for s in document.segments]
         self.cursor=0
 
     def block(self,source,start_frame,frames,volume=1.,active=True,correction=None):
         if not active or volume==0:return b'',np.zeros(frames*10,np.float32)
-        if abs(volume-self.volume)>1e-9:raise ValueError('Beam音量已改变，请先停止并重新编码')
+        if abs(volume-self.volume)>1e-9:raise ValueError('离线固定音量已改变，请先停止并重新编码')
         while self.cursor<len(self.bounds) and start_frame>=self.bounds[self.cursor][0]+len(self.bounds[self.cursor][1]['data']):self.cursor+=1
         if self.cursor>=len(self.bounds):return b'',np.zeros(frames*10,np.float32)
         begin,seg=self.bounds[self.cursor];offset=start_frame-begin
-        if offset<0 or offset+frames>len(seg['data']):raise ValueError('Beam播放块跨越休止边界')
+        if offset<0 or offset+frames>len(seg['data']):raise ValueError('离线播放块跨越休止边界')
         return seg['data'][offset:offset+frames],np.zeros(frames*10,np.float32)
 
 
@@ -300,7 +312,11 @@ def export_document(doc,folder,volume=1.):
     """The JSON schedule is necessary: concatenated BIN alone loses actual rests."""
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
     pcm=(doc.base_processed*volume+doc.quadratic_correction*volume**2) if doc.quadratic_correction is not None else doc.processed*volume
-    if doc.profile['encoder'].startswith('beam_'):
+    if doc.profile['encoder']=='discrete_score':
+        if doc.metadata['transport_plan']['backend']=='generic_score_only':raise ValueError('通用档案只导出曲谱JSON/MIDI，没有UART数据')
+        if abs(volume-doc.profile['prepared_volume'])>1e-9:raise ValueError('曲谱音量与预计算不一致，请重新转换')
+        segments=doc.segments;info=dict(doc.metadata['encoding'],transport_plan=doc.metadata['transport_plan'])
+    elif doc.profile['encoder'].startswith('beam_'):
         if abs(volume-doc.profile['beam_volume'])>1e-9:raise ValueError('Beam导出音量与预计算不一致，请重新编码')
         segments=doc.segments;info=doc.metadata['encoding']
     else:segments,info=encode_pcm(pcm,baud=doc.profile['baud'],bias=doc.profile['bias'],

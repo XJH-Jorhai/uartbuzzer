@@ -19,11 +19,12 @@ from .engine import convert,validate_profile,fit_recording,export_document,beam_
 from .devices import Microphone,SerialLink,Playback,serial_devices,microphones
 from .cache import ConversionCache,LibraryAudioCache
 from .library_ui import LibraryController
+from .score_ui import ScoreController
 from .song_calibration import (file_hash,legacy_auto_fit,resolve_profile,conversion_context,
                                validate_recording,profile_hash)
 from ..music import FS,music_fixture
 
-VERSION='1.4.1'
+VERSION='1.5.0-preview1'
 ASSETS=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[3]))/'desktop_assets'
 
 def data_root(data_dir=None):
@@ -61,9 +62,9 @@ def button(text,slot=None,primary=False):
     return b
 
 
-class MainWindow(LibraryController,QtWidgets.QMainWindow):
+class MainWindow(LibraryController,ScoreController,QtWidgets.QMainWindow):
     def __init__(self,data_dir=None):
-        super().__init__();self.setWindowTitle('UART Audio Studio 1.4.1 · 串口音乐工作台')
+        super().__init__();self.setWindowTitle('UART Audio Studio 1.5.0 预览 · 串口音乐工作台')
         available=QtGui.QGuiApplication.primaryScreen().availableGeometry()
         self.resize(min(1160,available.width()-24),min(820,available.height()-48));self.setMinimumSize(760,520)
         self.setAcceptDrops(True)
@@ -86,6 +87,8 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
             except Exception as e:logging.warning('Saved profile unavailable: %s',e)
         if not self.profile.get('predistortion') and self.profile.get('available_predistortion'):self.profile['predistortion']=self.profile['available_predistortion']
         self.legacy_encoder=self.profile.get('beam_baseline_encoder','bit_feedback_uart_v1') if self.profile.get('encoder','').startswith('beam_') else self.profile.get('encoder','bit_feedback_uart_v1')
+        if self.legacy_encoder=='discrete_score':self.legacy_encoder='bit_feedback_uart_v1'
+        self.init_score()
         self.doc=None;self.jobs=[];self.loading=False;self.conversion_job=None;self.player=None;self.play_job=None
         self.link=SerialLink();self.mic=Microphone();self.position=0.;self.last_recording=None;self.current_path=None;self.current_source=None
         self.disconnect_pending=False;self.exit_pending=False;self.live_decoded=np.zeros(2048);self.live_decode_rate=FS
@@ -124,15 +127,16 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         self.mode=QtWidgets.QComboBox();self.mode.addItem('清晰响亮  ·  音乐优化','music');self.mode.addItem('M2 电气模型补偿','electrical');self.mode.addItem('仅带限，不做补偿','bypass')
         self.mode.currentIndexChanged.connect(self.processing_changed);side.addWidget(self.mode)
         self.encoder_backend=QtWidgets.QComboBox();self.encoder_backend.setObjectName('encoderBackend')
-        for title,mode in [('B0 · 原有编码器（实时音量）','legacy'),('Beam · 快速（离线固定音量）','beam_fast'),('Beam · 高质量（离线固定音量）','beam_quality')]:self.encoder_backend.addItem(title,mode)
-        self.encoder_backend.setToolTip('保持同一音频前端，只替换字节编码。Beam需预计算固定音量；不保证THD或实际音质更好。')
+        for title,mode in [('B0 · 原有编码器（实时音量）','legacy'),('Beam · 快速（离线固定音量）','beam_fast'),('Beam · 高质量（离线固定音量）','beam_quality'),('离散曲谱（主旋律）','discrete_score')]:self.encoder_backend.addItem(title,mode)
+        self.encoder_backend.setToolTip('B0/Beam保持原音频前端；离散曲谱分析原始PCM并独立渲染。离线固定音量需预计算，不保证THD或实际音质更好。')
         self.encoder_backend.currentIndexChanged.connect(self.encoder_changed);side.addWidget(self.encoder_backend)
+        self.score_button=button('曲谱与器件档案…',self.show_score);self.score_button.setToolTip('查看有限曲谱、导入导出器件档案、主动播放器特性测试');side.addWidget(self.score_button)
         self.beam_budget=QtWidgets.QComboBox();self.beam_budget.setObjectName('beamBudget')
         for ratio in (1,5,30):self.beam_budget.addItem(f'计算预算：音频时长 ×{ratio}',float(ratio))
         self.beam_budget.setCurrentIndex(1);self.beam_budget.hide();self.beam_budget.currentIndexChanged.connect(self.processing_changed);side.addWidget(self.beam_budget)
         self.beam_hint=label('仅离线预计算；播放时固定音量，变化后需重编码。','Muted');self.beam_hint.setWordWrap(True);self.beam_hint.hide();side.addWidget(self.beam_hint)
         self.model_badge=label('M2 负载先验  /  音乐优化','Badge');side.addWidget(self.model_badge)
-        side.addWidget(label('16 kHz  ·  400–5000 Hz  ·  保持音高','Muted'))
+        self.band_hint=label('16 kHz  ·  400–5000 Hz  ·  保持音高','Muted');self.band_hint.setWordWrap(True);side.addWidget(self.band_hint)
         self.loudness=QtWidgets.QCheckBox('音乐响度增强 · 平滑限幅');self.loudness.setChecked(True)
         self.loudness.setToolTip('前瞻限幅：瞬态不会压低整首音乐的音量，不硬截波形。')
         self.loudness.toggled.connect(self.processing_changed);side.addWidget(self.loudness)
@@ -169,7 +173,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         side.addStretch(1)
         side.addWidget(button('打开录音与会话目录',self.open_sessions))
         side.addWidget(label(f'v{VERSION}  ·  本地处理，无需网络','Muted'))
-        main=QtWidgets.QWidget();layout.addWidget(main,1);content=QtWidgets.QVBoxLayout(main);content.setContentsMargins(14,12,14,10);content.setSpacing(6)
+        main=QtWidgets.QWidget();main.setMinimumWidth(450);layout.addWidget(main,1);content=QtWidgets.QVBoxLayout(main);content.setContentsMargins(14,12,14,10);content.setSpacing(6)
         header=QtWidgets.QHBoxLayout();header.addWidget(label('音频工作区','Title'));header.addStretch();header.addWidget(label('PCM → UART 8N1','Badge'));content.addLayout(header)
         file_card=QtWidgets.QFrame();file_card.setObjectName('Card');file_layout=QtWidgets.QHBoxLayout(file_card);file_layout.setContentsMargins(12,9,12,9)
         details=QtWidgets.QVBoxLayout();self.file_label=label('导入一份 WAV，开始播放');self.file_label.setStyleSheet('font-weight:600; font-size:14px;')
@@ -215,6 +219,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
 
     def _load_settings(self):
         self.volume.setValue(int(self.settings.value('volume',80)))
+        self.encoder_backend.setCurrentIndex(max(0,self.encoder_backend.findData(self.settings.value('encoder_backend','legacy'))))
         baud=int(self.settings.value('baud',460800));self.baud.setCurrentIndex(max(0,self.baud.findData(baud)))
         geometry=self.settings.value('geometry')
         if geometry:
@@ -224,7 +229,12 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
 
     def ensure_visible(self):
         available=self.screen().availableGeometry()
-        self.resize(min(self.width(),available.width()-24),min(self.height(),available.height()-48))
+        hint=self.minimumSizeHint()
+        width=max(self.width(),hint.width());height=max(self.height(),hint.height())
+        if not self.settings.value('geometry'):width=max(width,1160);height=max(height,820)
+        if width>available.width()-24 and self.library_dock.isVisible():
+            self.library_dock.hide();hint=self.minimumSizeHint();width=max(self.minimumWidth(),hint.width())
+        self.resize(min(width,available.width()-24),min(height,available.height()-48))
         self.move(available.x()+max(0,(available.width()-self.width())//2),available.y()+max(0,(available.height()-self.height())//2))
 
     def log(self,text):
@@ -333,7 +343,8 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         if self.current_path and not self.loading and not self.player:self.start_conversion()
 
     def encoder_changed(self):
-        beam=self.encoder_backend.currentData()!='legacy'
+        beam=self.encoder_backend.currentData().startswith('beam_')
+        self.settings.setValue('encoder_backend',self.encoder_backend.currentData())
         self.beam_budget.setVisible(beam);self.beam_hint.setVisible(beam)
         self.beam_budget.blockSignals(True);self.beam_budget.setCurrentIndex(2 if self.encoder_backend.currentData()=='beam_quality' else 1);self.beam_budget.blockSignals(False)
         self.processing_changed()
@@ -344,9 +355,10 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         path=self.current_path;source=self.current_source;profile=copy.deepcopy(self.profile);profile['baud']=self.baud.currentData();mode=self.mode.currentData()
         backend=self.encoder_backend.currentData()
         profile['encoder']=self.legacy_encoder if backend=='legacy' else backend
-        if backend!='legacy':
+        if backend.startswith('beam_'):
             profile.update(beam_baseline_encoder=self.legacy_encoder,beam_volume=self.volume.value()/100,
                            beam_settings={'budget_ratio':self.beam_budget.currentData()})
+        if backend=='discrete_score':profile.update(score_config=self.score_options(),prepared_volume=self.volume.value()/100)
         profile.update(conditioning='music_loudness_lookahead_v2' if self.loudness.isChecked() else 'legacy',
                        continuous_carrier=self.continuous.isChecked(),soft_carrier_edges=True,
                        loudness_target_rms=self.loudness_level.currentData())
@@ -359,7 +371,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         def perform(j):
             model_sha=file_hash(fit_path,j.isInterruptionRequested)
             source_sha=file_hash(path,j.isInterruptionRequested) if source is None else None
-            effective=resolve_profile(profile,track.get('calibration'),source_sha,mode,model_sha,enabled)
+            effective=profile if backend=='discrete_score' else resolve_profile(profile,track.get('calibration'),source_sha,mode,model_sha,enabled)
             doc=self.cache.convert(path,effective,mode,fit_path,progress=j.progress.emit,cancel_check=j.isInterruptionRequested,source=source,name=name)
             if source is None and (doc.metadata['source_commit']['source_sha256']!=source_sha or file_hash(path,j.isInterruptionRequested)!=source_sha):raise ValueError('转换期间歌曲文件已改变，请重新加载')
             doc.metadata['song_context']=conversion_context(track_id,path,source_sha,profile,model_sha)
@@ -368,6 +380,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
                    else '源文件变化，本曲校准暂不适用' if record and record.get('source_sha256')!=source_sha
                    else '设置变化，本曲校准暂不适用' if record else '本曲未校准')
             doc.metadata['song_calibration_state']=state
+            if backend=='discrete_score':doc.metadata['song_calibration_state']='离散曲谱：旧EQ / FIR及本曲校准已旁路'
             return doc
         job=Job(perform,self)
         self.conversion_job=job;self.jobs.append(job);job.progress.connect(lambda v:self.conversion.setValue(int(v*1000)))
@@ -381,7 +394,8 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
     def beam_progress(self,value):
         elapsed=time.monotonic()-self.conversion_started
         remaining=elapsed*(1-value)/max(value,.001)
-        self.convert_label.setText(f'Beam离线预计算 · {value*100:.0f}% · 已用{elapsed:.1f}s · 预计剩余{remaining:.1f}s（估算）')
+        title='曲谱分析/拟合/渲染' if self.encoder_backend.currentData()=='discrete_score' else 'Beam离线预计算'
+        self.convert_label.setText(f'{title} · {value*100:.0f}% · 已用{elapsed:.1f}s · 预计剩余{remaining:.1f}s（估算）')
 
     def converted(self,doc):
         if self.pending_track:
@@ -403,6 +417,9 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
             self.model_badge.setText('measured M2 electrical current model');self.model_badge.setWordWrap(True)
             self.log(f'Beam {doc.profile["beam_volume"]*100:.0f}%固定音量；模型{b["model_hash"][:12]}；耗时{b["seconds"]:.2f}s{suffix}')
         else:self.model_badge.setText('M2 负载先验  /  音乐优化')
+        if doc.metadata.get('score'):
+            d=doc.metadata['score']['diagnostics'];self.model_badge.setText('有限曲谱 · '+doc.metadata['score']['device_id']);self.model_badge.setWordWrap(True)
+            self.convert_label.setText(f'{status} · {d["events"]}音符 / {d["unique_event_pitches"]}音高 · 原主线时长覆盖{d["melody_temporal_coverage"]:.1%}（非GT）')
         if cached.get('error'):self.log('缓存写入不可用，本次播放不受影响：'+cached['error'])
         self._update_controls();self.reset_plots()
         self.library_conversion_done(doc)
@@ -415,6 +432,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         if self.player:
             self.player.paused=not self.player.paused;self.log('播放已暂停。' if self.player.paused else '继续播放。');self._update_controls();return
         if not self.doc or self.loading:return
+        if self.doc.metadata.get('transport_plan',{}).get('backend')=='generic_score_only':self.fail('此档案仅导出通用曲谱，尚无执行后端；不会连接或发送运动命令。');return
         if not self.link.connected:self.fail('请先选择并连接串口。');return
         if self.current_track_id:
             if not self.queue_ids or self.current_track_id not in self.queue_ids:self.queue_ids=self.library.ids()
@@ -461,7 +479,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         if not hasattr(self,'volume_label'):return
         self.volume_label.setText(f'{self.volume.value()}%');self.settings.setValue('volume',self.volume.value())
         if self.player:self.player.volume=self.volume.value()/100;self.player.muted=self.mute.isChecked()
-        if not self.player and hasattr(self,'encoder_backend') and self.encoder_backend.currentData()!='legacy' and not self.loading and self.doc and abs(self.volume.value()/100-self.doc.profile.get('beam_volume',-1))>1e-9:
+        if not self.player and hasattr(self,'encoder_backend') and self.encoder_backend.currentData()!='legacy' and not self.loading and self.doc and abs(self.volume.value()/100-self.doc.profile.get('prepared_volume',self.doc.profile.get('beam_volume',-1)))>1e-9:
             self.play_button.setEnabled(False);self.convert_label.setText('Beam音量已变化，请点击“重新编码”后播放')
             if not hasattr(self,'beam_volume_timer'):
                 self.beam_volume_timer=QtCore.QTimer(self);self.beam_volume_timer.setSingleShot(True);self.beam_volume_timer.timeout.connect(self.start_conversion)
@@ -576,11 +594,14 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         self.ports.setEnabled(not connected and not playing);self.baud.setEnabled(not playing and not busy);self.mode.setEnabled(not playing and not busy)
         self.encoder_backend.setEnabled(not playing and not busy);self.beam_budget.setEnabled(not playing and not busy)
         prepared_beam=self.doc is not None and bool(self.doc.metadata.get('beam'))
+        prepared_score=self.doc is not None and bool(self.doc.metadata.get('score'))
+        self.score_button.setEnabled(not playing and not busy)
         self.ab_button.setEnabled(prepared_beam and not playing and not busy)
-        self.volume.setEnabled(not (playing and prepared_beam) and not (busy and self.encoder_backend.currentData()!='legacy'))
+        self.volume.setEnabled(not (playing and (prepared_beam or prepared_score)) and not (busy and self.encoder_backend.currentData()!='legacy'))
         self.connect_button.setText('断开串口' if connected else '连接串口');self.connection.setText(('●  '+self.link.name+' 已连接') if connected else '●  未连接')
         self.connection.setStyleSheet('color:#83c99e;' if connected else 'color:#93999f;')
         self.play_button.setEnabled((self.doc is not None and not busy and connected) or playing)
+        if self.doc and self.doc.metadata.get('transport_plan',{}).get('backend')=='generic_score_only':self.play_button.setEnabled(False)
         self.play_button.setText(('▶  继续' if self.player.paused else 'Ⅱ  暂停') if playing else '▶  播放')
         self.stop_button.setEnabled(playing and not self.player.stop_event.is_set() if playing else False)
         if hasattr(self,'next_button'):
@@ -590,6 +611,12 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         self.export_button.setEnabled(self.doc is not None and not busy and not playing)
         self.save_profile_button.setEnabled(not busy)
         self.fit_button.setEnabled(self.last_recording is not None and not playing and not busy)
+        if prepared_score:
+            self.fit_button.setEnabled(False);self.song_calibration_box.setEnabled(False)
+        score_mode=self.encoder_backend.currentData()=='discrete_score'
+        self.band_hint.setText('原始16 kHz · MIDI48–96 · 有限主旋律' if score_mode else '16 kHz  ·  400–5000 Hz  ·  保持音高')
+        if score_mode:
+            for control in (self.mode,self.loudness,self.loudness_level,self.continuous,self.predistortion_box):control.setEnabled(False)
         self.mic_button.setEnabled(not playing);self.mics.setEnabled(not bool(self.mic.stream) and not playing)
         self.mic_button.setText('关闭麦克风' if self.mic.stream else '启用麦克风')
         self.record_button.setEnabled(bool(self.mic.stream) and not playing);self.record_button.setText('停止并保存录音' if self.mic.recording else '开始独立录音')
@@ -623,7 +650,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         elif self.doc:
             a=self.doc.decoded if source=='decoded' else self.doc.processed
             end=min(len(a),max(32 if self.player else 4096,int(self.position*FS)))
-            gain=0 if self.mute.isChecked() else (1. if source=='decoded' and self.doc.metadata.get('beam') else self.volume.value()/100)
+            gain=0 if self.mute.isChecked() else (1. if self.doc.metadata.get('score') or (source=='decoded' and self.doc.metadata.get('beam')) else self.volume.value()/100)
             y=a[max(0,end-4096):end]*gain
             if source!='decoded' and self.doc.quadratic_correction is not None:
                 gain=0 if self.mute.isChecked() else self.volume.value()/100
@@ -652,6 +679,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
 
     def closeEvent(self,event):
         if self.player or self.jobs:
+            for job in self.jobs:job.requestInterruption()
             self.exit_pending=True;self.cancel_conversion();self.stop_play();event.ignore();self.hide()
             return
         self._finish_close();event.accept()
@@ -717,10 +745,19 @@ def main():
     parser.add_argument('--state-report',type=Path,help=argparse.SUPPRESS)
     parser.add_argument('--qa-calibration',type=Path,help=argparse.SUPPRESS)
     parser.add_argument('--beam-benchmark',type=Path,help=argparse.SUPPRESS)
+    parser.add_argument('--score-self-test',type=Path,help='Offline finite-score report; requires a new isolated --data-dir')
+    parser.add_argument('--score-gui-qa',type=Path,help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.self_test:self_test(args.self_test);return
+    if args.score_self_test:
+        if args.data_dir is None:parser.error('--score-self-test requires isolated --data-dir')
+        from .score_qa import run
+        run(args.data_dir,args.score_self_test,ASSETS);return
     app=QtWidgets.QApplication(sys.argv[:1]);app.setApplicationName('UART Audio Studio');app.setOrganizationName('ZipLab')
     app.setStyle('Fusion');app.setFont(QtGui.QFont('Microsoft YaHei UI',9))
+    if args.score_gui_qa:
+        from .score_gui_qa import run
+        run(args.score_gui_qa);return
     if args.beam_benchmark:
         if args.data_dir is None:parser.error('--beam-benchmark requires isolated --data-dir')
         from .beam_benchmark import run

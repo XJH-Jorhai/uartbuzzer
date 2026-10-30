@@ -1,14 +1,15 @@
-"""Build public 1.4.1 from source without modifying the input tree."""
+"""Build 1.5.0 preview from source without modifying the input tree."""
 import argparse
 import hashlib
 import importlib.metadata as metadata
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sys
 
-VERSION='1.4.1'
+VERSION='1.5.0-preview1'
 SELECTOR_NUMBA_VERSION='0.62.1'
 SELECTOR_SOURCE_SHA256='694eabf5ab6e67c4983fc5044494260f0f84714877af3c0090d44e8d0d133db5'
 
@@ -55,7 +56,13 @@ def prepare_assets(snapshot,root):
     fingerprint=dict({Path(n).name:sha(snapshot/'src/uart_buzzer'/n) for n in names},numba_selector_dependency=attestation)
     (assets/'dsp_fingerprint.json').write_text(json.dumps(fingerprint,indent=2))
     (assets/'beam_backend.json').write_text(json.dumps(attestation,indent=2),encoding='utf-8')
-    version=(assets/'version_info.txt').read_text().replace('1,3,1,0','1,4,1,0').replace('1,4,0,0','1,4,1,0').replace('1.3.1',VERSION).replace('1.4.0',VERSION)
+    score_files=sorted((snapshot/'src/uart_buzzer/score').glob('*.py'))
+    (assets/'score_fingerprint.json').write_text(json.dumps({p.name:sha(p) for p in score_files},indent=2),encoding='utf-8')
+    version=(assets/'version_info.txt').read_text()
+    version=re.sub(r'(filevers|prodvers)=\([^)]*\)',lambda m:m.group(1)+'=(1,5,0,1)',version)
+    version=re.sub(r"StringStruct\('FileVersion',\s*'[^']*'\)","StringStruct('FileVersion', '1.5.0.1')",version)
+    version=re.sub(r"StringStruct\('ProductVersion',\s*'[^']*'\)","StringStruct('ProductVersion', '"+VERSION+"')",version)
+    if not re.search(r"StringStruct\('ProductVersion',\s*'"+re.escape(VERSION)+r"'\)",version):raise ValueError('Product version resource was not updated')
     (assets/'version_info.txt').write_text(version)
     (assets/'NOTICE.txt').write_text('UART Audio Studio '+VERSION+'\nIncludes Python, NumPy, SciPy, PySide6/Qt, pyqtgraph, pyserial, sounddevice, Numba and LLVM/llvmlite. See bundled licenses.\n',encoding='utf-8')
     notices=assets/'licenses';notices.mkdir(exist_ok=True)

@@ -1,4 +1,6 @@
-# UART Audio Studio 1.4.1
+# UART Audio Studio · 1.5.0 预览分支
+
+稳定发布仍为1.4.1。本分支加入可选 [离散主旋律曲谱](docs/finite_score.md) 与命名器件档案；预览包独立交付，不替换稳定EXE。
 
 用于 CH343 5 V TTL UART 8N1 电磁蜂鸣器的 Windows 播放器，包含 WAV 文件库、歌单、长期转换缓存、波形、FFT、录音与单曲校准。
 
@@ -19,8 +21,8 @@ python -m venv .venv
 ```powershell
 .venv\Scripts\python -m pip install -r requirements-test.txt
 .venv\Scripts\python scripts/test_desktop_only.py
-.venv\Scripts\python scripts/build_desktop.py --out dist/single-v141 --work build/single-v141
-.venv\Scripts\python scripts/build_desktop.py --onedir --out dist/portable-v141 --work build/portable-v141
+.venv\Scripts\python scripts/build_desktop.py --out dist/preview-single --work build/preview-single
+.venv\Scripts\python scripts/build_desktop.py --onedir --out dist/preview-portable --work build/preview-portable
 ```
 
 每次构建使用新的输出和工作目录。构建器复制源码后在工作目录准备资产，不改输入源码，不要求已有实验结果。`--snapshot` 可指定另一个完整源码目录。`requirements-build.txt` 提供单独构建依赖；测试命令不打开设备。Numba 及私有选择辅助函数有版本和源码 SHA 守卫，替换它们需重新验证；不支持时运行时保留原始搜索回退。

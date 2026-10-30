@@ -17,7 +17,7 @@ class LibraryPanel(QtWidgets.QWidget):
         self.tree.header().setStretchLastSection(False);self.tree.header().setSectionResizeMode(0,QtWidgets.QHeaderView.Stretch);self.tree.header().setSectionResizeMode(1,QtWidgets.QHeaderView.ResizeToContents)
         self.tree.itemDoubleClicked.connect(lambda item,col:owner.request_track(item.data(0,QtCore.Qt.UserRole),True,True))
         self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu);self.tree.customContextMenuRequested.connect(self.menu);layout.addWidget(self.tree,1)
-        self.count=QtWidgets.QLabel();layout.addWidget(self.count)
+        self.count=QtWidgets.QLabel();self.count.setWordWrap(True);layout.addWidget(self.count)
         row=QtWidgets.QHBoxLayout()
         for text,slot in [('导入 WAV',owner.open_file),('导入文件夹',self.folder)]:
             b=QtWidgets.QPushButton(text);b.clicked.connect(slot);row.addWidget(b)
@@ -127,6 +127,7 @@ class LibraryController:
         open_data=QtWidgets.QPushButton('打开歌单 / 转换文件目录');open_data.setToolTip(str(self.root));open_data.clicked.connect(lambda:QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self.root))))
         self.library_panel.layout().addWidget(open_data)
         location=QtWidgets.QLabel('歌单：'+str(self.library.path));location.setWordWrap(True);location.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse);location.setStyleSheet('color:#93999f;font-size:10px;')
+        location.setSizePolicy(QtWidgets.QSizePolicy.Ignored,QtWidgets.QSizePolicy.Preferred)
         self.library_panel.layout().addWidget(location)
     def import_tracks(self,paths):
         if self.importing_library:return

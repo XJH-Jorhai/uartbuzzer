@@ -31,6 +31,24 @@ def microphones():
     return result
 
 
+def recording_reference(document,volume_events):
+    if document.metadata.get('score'):
+        ref=document.processed.copy();mask=np.zeros(len(ref));events=volume_events
+        for i,event in enumerate(events):
+            a=round(event['source_s']*FS);b=round(events[i+1]['source_s']*FS) if i+1<len(events) else len(ref)
+            mask[a:b]=float(event['volume']>0)
+        return ref*mask  # Score already contains fixed volume and note envelopes.
+    ref=document.base_processed.copy() if document.base_processed is not None else document.processed.copy()
+    envelope=np.zeros(len(ref));previous=0.;cursor=0
+    for event in volume_events:
+        a=int(event['source_s']*FS);b=min(len(ref),a+max(1,int(event['ramp_s']*FS)))
+        envelope[cursor:a]=previous;envelope[a:b]=np.linspace(previous,event['volume'],b-a)
+        previous=event['volume'];cursor=b
+    envelope[cursor:]=previous;ref*=envelope
+    if document.quadratic_correction is not None:ref+=document.quadratic_correction*envelope**2
+    return ref
+
+
 class Microphone:
     def __init__(self):
         self.lock=threading.Lock();self.stream=None;self.ring=deque(maxlen=120);self.chunks=[]
@@ -111,7 +129,7 @@ class Playback:
     """Bounded serial queue; live gain ramps and mute never enqueue zero bytes."""
     def __init__(self,link,document,mic,folder,volume=1.,record=False,telemetry=None):
         self.link=link;self.doc=replace(document,profile=copy.deepcopy(document.profile),metadata=copy.deepcopy(document.metadata));self.mic=mic;self.folder=Path(folder)
-        self.calibration_context=freeze_recording_context(self.doc) if record else None
+        self.calibration_context=freeze_recording_context(self.doc) if record and not self.doc.metadata.get('score') else None
         self.volume=volume;self.muted=False;self.paused=False;self.stop_event=threading.Event()
         self.record=record;self.telemetry=telemetry;self.last_recording=None;self.any_pause=False
         self.volume_events=[]
@@ -132,7 +150,7 @@ class Playback:
         if not self.link.connected:raise RuntimeError('请先连接串口')
         self.folder.mkdir(parents=True,exist_ok=True)
         baud=self.doc.profile['baud'];self.link.port.baudrate=baud
-        if self.doc.profile.get('encoder','').startswith('beam_'):
+        if self.doc.profile.get('encoder','').startswith('beam_') or self.doc.profile.get('encoder')=='discrete_score':
             from .engine import PrecomputedEncoder
             encoder=PrecomputedEncoder(self.doc)
         else:encoder=LiveEncoder(self.doc.profile)
@@ -224,17 +242,7 @@ class Playback:
             if owns_record:
                 time.sleep(.15)
                 self.last_recording=self.mic.stop(self.folder,metadata)
-                ref=self.doc.base_processed.copy() if self.doc.base_processed is not None else self.doc.processed.copy()
-                envelope=np.zeros(len(ref));times=np.arange(len(ref))/FS
-                previous=0.;cursor=0
-                for event in self.volume_events:
-                    a=int(event['source_s']*FS);b=min(len(ref),a+max(1,int(event['ramp_s']*FS)))
-                    envelope[cursor:a]=previous
-                    envelope[a:b]=np.linspace(previous,event['volume'],b-a)
-                    previous=event['volume'];cursor=b
-                envelope[cursor:]=previous
-                ref*=envelope
-                if self.doc.quadratic_correction is not None:ref+=self.doc.quadratic_correction*envelope**2
+                ref=recording_reference(self.doc,self.volume_events)
                 wavfile.write(self.folder/'reference_processed.wav',FS,ref)
                 metadata['calibration_reference_sha256']=file_hash(self.folder/'reference_processed.wav')
                 metadata['calibration_capture_sha256']=file_hash(self.last_recording)

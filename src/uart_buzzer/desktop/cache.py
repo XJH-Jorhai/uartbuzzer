@@ -77,6 +77,12 @@ class ConversionCache:
             settings.update(beam_model_hash=model_identity(fit_path)[0],beam_version=ENCODER_VERSION,
                 beam_settings=profile.get('beam_settings',{}),beam_volume=profile.get('beam_volume',1.),
                 beam_baseline_encoder=profile.get('beam_baseline_encoder','bit_feedback_uart_v1'))
+        if settings['encoder']=='discrete_score':
+            from ..score.pipeline import VERSION,FRONTEND_VERSION,fingerprint,settings as score_settings
+            from ..score.uart_renderer import VERSION as renderer_version
+            settings.update(score_config=score_settings(profile.get('score_config')),score_volume=profile.get('prepared_volume',.8),
+                score_pipeline=VERSION,score_frontend=FRONTEND_VERSION,score_modules=fingerprint(),score_renderer=renderer_version,
+                score_backend='explicit_segmented_uart8n1_or_generic')
         if mode=='electrical':settings['fit_sha256']=hashlib.sha256(Path(fit_path).read_bytes()).hexdigest()
         if profile.get('_song_calibration'):
             settings['song_calibration']=profile['_song_calibration']
@@ -170,6 +176,15 @@ class ConversionCache:
                     baseline_segments=[];cursor=0
                     for seg in segments:
                         count=len(seg['data']);baseline_segments.append(dict(seg,data=bp[cursor:cursor+count].tobytes()));cursor+=count
+                if m['profile'].get('encoder')=='discrete_score':
+                    from ..score.contracts import score_ir
+                    from ..score.model import digest
+                    score=score_ir(m['metadata']['score']);plan=m['metadata']['transport_plan']
+                    if plan.get('schema')!='finite-score-transport-plan-v1' or plan.get('score_hash')!=digest(score):raise ValueError('Invalid cached score transport')
+                    expected=plan.get('segments',[])
+                    if len(expected)!=len(segments):raise ValueError('Invalid cached score schedule')
+                    for proof,segment in zip(expected,segments):
+                        if proof['sha256']!=hashlib.sha256(segment['data']).hexdigest() or proof['start_s']!=segment['start_s'] or proof['end_s']!=segment['end_s']:raise ValueError('Invalid cached score payload')
                 doc=AudioDocument('','',*arrays,segments,validate_profile(m['profile']),m['metadata'],base,correction,baseline_segments,beam_pcm)
             os.utime(path,None)
             return doc
