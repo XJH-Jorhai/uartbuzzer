@@ -65,3 +65,9 @@ cache/
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Generated note scores and exported device profiles
+*.mid
+*.midi
+/score.json
+/device-profile.json
