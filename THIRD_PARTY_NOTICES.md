@@ -25,3 +25,8 @@ MME/DirectSound/WDM/WASAPI, excluding the unused ASIO-enabled variant. Additiona
 Python, PortAudio, OpenSSL, libffi, expat and zlib notices and their upstream
 source URLs are retained in `desktop_assets/licenses/`. Rebuild with the supplied
 `scripts/hooks/hook-sounddevice.py`; retain those notices when redistributing.
+
+Numba 0.62.1 and llvmlite 0.45.1 are bundled with their BSD and third-party
+notices, including LLVM notices. The exact selector helper is imported from
+Numba, not relicensed as project-original code. The build checks its source hash.
+No downloaded research papers, transcription models or their weights are bundled.

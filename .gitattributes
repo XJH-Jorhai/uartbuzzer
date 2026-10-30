@@ -1,11 +1,6 @@
-* text=auto eol=lf
-*.py text eol=lf
-*.md text eol=lf
-*.yml text eol=lf
-*.json text eol=lf
-*.csv text eol=lf
-*.ps1 text eol=crlf
+# Preserve exact published bytes: DSP and asset hashes are persisted identities.
+# Do not normalize line endings when staging or checking out this release.
+* -text
 *.ico binary
 *.png binary
-# Preserve upstream license formatting, including intentional whitespace.
 desktop_assets/licenses/** -whitespace
