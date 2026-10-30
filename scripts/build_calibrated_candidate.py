@@ -26,6 +26,28 @@ def selector_attestation():
     return dict(numba_version=dist.version,arraymath_sha256=actual)
 
 
+def collect_distribution_notices(name,dist,notices):
+    """Keep wheel aggregate licenses and conflicting child notices separately."""
+    for item in dist.files or []:
+        if not any(s in item.name.lower() for s in ('license','copying','notice')):continue
+        source=Path(dist.locate_file(item))
+        if not source.is_file():continue
+        parts=item.parts
+        aggregate=(item.name.lower()=='license.txt' and
+                   any(part.endswith('.dist-info') for part in parts) and
+                   (len(parts)==2 or (len(parts)==3 and parts[-2]=='licenses')))
+        if aggregate:
+            destination=notices/(name+'_WHEEL_LICENSE.txt')
+        else:
+            destination=notices/(name+'_'+item.name)
+            if destination.exists() and sha(destination)!=sha(source):
+                path_id=hashlib.sha256(item.as_posix().encode()).hexdigest()[:16]
+                destination=notices/(name+'_'+path_id+'_'+item.name)
+        if destination.exists() and sha(destination)!=sha(source):
+            raise RuntimeError('Conflicting license destination: '+destination.name)
+        shutil.copy2(source,destination)
+
+
 def prepare_assets(snapshot,root):
     assets=snapshot/'desktop_assets'
     attestation=selector_attestation()
@@ -39,10 +61,7 @@ def prepare_assets(snapshot,root):
     notices=assets/'licenses';notices.mkdir(exist_ok=True)
     for name in ('numba','llvmlite','numpy','scipy','PySide6-Essentials','shiboken6','pyqtgraph','pyserial','sounddevice','cffi','pyinstaller'):
         dist=metadata.distribution(name)
-        for item in dist.files or []:
-            if any(s in item.name.lower() for s in ['license','copying','notice']):
-                source=Path(dist.locate_file(item))
-                if source.is_file():shutil.copy2(source,notices/(name+'_'+item.name))
+        collect_distribution_notices(name,dist,notices)
     shutil.copy2(root/'LICENSE',notices/'PROJECT-MIT.txt')
 
 
