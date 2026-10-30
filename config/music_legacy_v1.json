@@ -39,13 +39,11 @@
     400,
     5000
   ],
-  "source_run": "%USERPROFILE%\\Desktop\\uartbuzzer\\results\\hardware\\music_20261029_003833",
   "clock_scale_estimate": 0.9916628755184523,
   "tone_specific_harmonic_correction": false,
   "trained_on": "cross_register_polyphonic_music_6s",
   "heldout_used_for_training": false,
   "model_prior": {
-    "load_fit_file": "%USERPROFILE%\\Desktop\\uartbuzzer\\results\\study\\20261028_221317\\fit\\fit.json",
     "load_fit_sha256": "c955f9ad66f8d24c8d13b12eb31f0c9949fa3d4bb938647dd9eadf432376c604",
     "model": "M2",
     "Rlimit_assumed_from_existing_hardware_records_ohm": 55.0,
@@ -85,7 +83,6 @@
   "heldout_improvement_log_band_error_dB": 0.4615040664263379,
   "stable_capture": true,
   "status": "validated_relative_music_candidate",
-  "final_full_song_run": "%USERPROFILE%\\Desktop\\uartbuzzer\\results\\hardware\\music_playback_20261029_004114",
   "full_song_validation": {
     "source_duration_s": 24.0,
     "port": "COM6",

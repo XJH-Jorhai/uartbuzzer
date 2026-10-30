@@ -1,5 +1,6 @@
 """Native Qt Windows frontend; no web server, browser or VS Code dependency."""
 import argparse
+import copy
 from datetime import datetime
 import json
 import logging
@@ -14,13 +15,15 @@ from fractions import Fraction
 from PySide6 import QtCore,QtGui,QtWidgets
 import pyqtgraph as pg
 from .theme import STYLE
-from .engine import convert,validate_profile,fit_recording,export_document
+from .engine import convert,validate_profile,fit_recording,export_document,beam_ab_preview
 from .devices import Microphone,SerialLink,Playback,serial_devices,microphones
 from .cache import ConversionCache,LibraryAudioCache
 from .library_ui import LibraryController
+from .song_calibration import (file_hash,legacy_auto_fit,resolve_profile,conversion_context,
+                               validate_recording,profile_hash)
 from ..music import FS,music_fixture
 
-VERSION='1.3.1'
+VERSION='1.4.1'
 ASSETS=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[3]))/'desktop_assets'
 
 def data_root(data_dir=None):
@@ -60,7 +63,7 @@ def button(text,slot=None,primary=False):
 
 class MainWindow(LibraryController,QtWidgets.QMainWindow):
     def __init__(self,data_dir=None):
-        super().__init__();self.setWindowTitle('UART Audio Studio · 串口音乐工作台')
+        super().__init__();self.setWindowTitle('UART Audio Studio 1.4.1 · 串口音乐工作台')
         available=QtGui.QGuiApplication.primaryScreen().availableGeometry()
         self.resize(min(1160,available.width()-24),min(820,available.height()-48));self.setMinimumSize(760,520)
         self.setAcceptDrops(True)
@@ -70,12 +73,19 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         logging.basicConfig(filename=str(self.root/'application.log'),level=logging.INFO,encoding='utf-8')
         self.settings=QtCore.QSettings(str(self.root/'settings.ini'),QtCore.QSettings.IniFormat)
         self.base_profile=validate_profile(json.loads((ASSETS/'music_profile.json').read_text(encoding='utf-8')))
-        self.profile=dict(self.base_profile);self.fit_path=ASSETS/'impedance_fit.json'
+        self.profile=copy.deepcopy(self.base_profile);self.fit_path=ASSETS/'impedance_fit.json'
+        self.profile_migration_warning=None
         saved_profile=self.settings.value('profile_path')
         if saved_profile:
-            try:self.profile=validate_profile(json.loads(Path(saved_profile).read_text(encoding='utf-8-sig')))
+            try:
+                saved=validate_profile(json.loads(Path(saved_profile).read_text(encoding='utf-8-sig')))
+                if self.settings.value('global_profile_origin')!='manual_import' and legacy_auto_fit(saved,saved_profile):
+                    self.profile_migration_warning='旧录音拟合缺少歌曲来源，已停止全局自动加载；原文件保留。请为对应歌曲重新同步录音校准，或手动导入为全局配置。'
+                    self.settings.setValue('legacy_auto_fit_path',saved_profile);self.settings.remove('profile_path')
+                else:self.profile=saved
             except Exception as e:logging.warning('Saved profile unavailable: %s',e)
         if not self.profile.get('predistortion') and self.profile.get('available_predistortion'):self.profile['predistortion']=self.profile['available_predistortion']
+        self.legacy_encoder=self.profile.get('beam_baseline_encoder','bit_feedback_uart_v1') if self.profile.get('encoder','').startswith('beam_') else self.profile.get('encoder','bit_feedback_uart_v1')
         self.doc=None;self.jobs=[];self.loading=False;self.conversion_job=None;self.player=None;self.play_job=None
         self.link=SerialLink();self.mic=Microphone();self.position=0.;self.last_recording=None;self.current_path=None;self.current_source=None
         self.disconnect_pending=False;self.exit_pending=False;self.live_decoded=np.zeros(2048);self.live_decode_rate=FS
@@ -87,6 +97,7 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         self.statusBar().showMessage('就绪  ·  未连接串口')
         self.log(f'数据目录：{self.root} · 歌单恢复 {len(self.library.ids("all"))} 首')
         if self.library.warning:self.fail(self.library.warning)
+        if self.profile_migration_warning:self.fail(self.profile_migration_warning)
 
     def _build(self):
         self.setStyleSheet(STYLE)
@@ -112,6 +123,14 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         side.addWidget(label('音频处理','SectionTitle'))
         self.mode=QtWidgets.QComboBox();self.mode.addItem('清晰响亮  ·  音乐优化','music');self.mode.addItem('M2 电气模型补偿','electrical');self.mode.addItem('仅带限，不做补偿','bypass')
         self.mode.currentIndexChanged.connect(self.processing_changed);side.addWidget(self.mode)
+        self.encoder_backend=QtWidgets.QComboBox();self.encoder_backend.setObjectName('encoderBackend')
+        for title,mode in [('B0 · 原有编码器（实时音量）','legacy'),('Beam · 快速（离线固定音量）','beam_fast'),('Beam · 高质量（离线固定音量）','beam_quality')]:self.encoder_backend.addItem(title,mode)
+        self.encoder_backend.setToolTip('保持同一音频前端，只替换字节编码。Beam需预计算固定音量；不保证THD或实际音质更好。')
+        self.encoder_backend.currentIndexChanged.connect(self.encoder_changed);side.addWidget(self.encoder_backend)
+        self.beam_budget=QtWidgets.QComboBox();self.beam_budget.setObjectName('beamBudget')
+        for ratio in (1,5,30):self.beam_budget.addItem(f'计算预算：音频时长 ×{ratio}',float(ratio))
+        self.beam_budget.setCurrentIndex(1);self.beam_budget.hide();self.beam_budget.currentIndexChanged.connect(self.processing_changed);side.addWidget(self.beam_budget)
+        self.beam_hint=label('仅离线预计算；播放时固定音量，变化后需重编码。','Muted');self.beam_hint.setWordWrap(True);self.beam_hint.hide();side.addWidget(self.beam_hint)
         self.model_badge=label('M2 负载先验  /  音乐优化','Badge');side.addWidget(self.model_badge)
         side.addWidget(label('16 kHz  ·  400–5000 Hz  ·  保持音高','Muted'))
         self.loudness=QtWidgets.QCheckBox('音乐响度增强 · 平滑限幅');self.loudness.setChecked(True)
@@ -133,7 +152,11 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         advanced=QtWidgets.QWidget();advanced_layout=QtWidgets.QVBoxLayout(advanced);advanced_layout.setContentsMargins(0,0,0,0);advanced_layout.setSpacing(6)
         advanced.hide();side.addWidget(advanced)
         advanced_button.toggled.connect(lambda on:(advanced.setVisible(on),advanced_button.setText('配置与录音拟合 ▾' if on else '配置与录音拟合 ▸')))
-        profile_row=QtWidgets.QHBoxLayout();self.import_profile_button=button('导入配置',self.import_profile);self.save_profile_button=button('导出配置',self.save_profile)
+        self.song_calibration_box=QtWidgets.QCheckBox('启用本曲录音校准');self.song_calibration_box.setChecked(True)
+        self.song_calibration_box.setToolTip('只对录音对应歌曲及匹配设置生效；关闭可恢复原补偿并复用原缓存。')
+        self.song_calibration_box.toggled.connect(self.song_calibration_changed);advanced_layout.addWidget(self.song_calibration_box)
+        self.calibration_status=label('本曲未校准','Muted');self.calibration_status.setWordWrap(True);advanced_layout.addWidget(self.calibration_status)
+        profile_row=QtWidgets.QHBoxLayout();self.import_profile_button=button('导入全局配置',self.import_profile);self.save_profile_button=button('导出配置',self.save_profile)
         profile_row.addWidget(self.import_profile_button);profile_row.addWidget(self.save_profile_button);advanced_layout.addLayout(profile_row)
         self.fit_button=button('用最近录音拟合补偿',self.fit_latest);self.fit_button.setToolTip('基于整段音乐的宽带正则拟合；需要完整、未暂停的同步播放录音')
         advanced_layout.addWidget(self.fit_button)
@@ -175,9 +198,11 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         controls=QtWidgets.QHBoxLayout();self.play_button=button('▶  播放',self.toggle_play,True);self.play_button.setMinimumWidth(110)
         self.stop_button=button('■  停止',self.stop_play);self.stop_button.setObjectName('Danger');controls.addWidget(self.play_button);controls.addWidget(self.stop_button)
         self.export_button=button('导出串口数据',self.export_data);controls.addWidget(self.export_button);controls.addStretch()
-        self.mute=QtWidgets.QToolButton();self.mute.setText('静音');self.mute.setCheckable(True);self.mute.toggled.connect(self.volume_changed);controls.addWidget(self.mute)
+        self.ab_button=button('离线 A/B',self.show_beam_ab);self.ab_button.setEnabled(False);controls.insertWidget(3,self.ab_button)
+        volume_row=QtWidgets.QHBoxLayout();volume_row.addStretch()
+        self.mute=QtWidgets.QToolButton();self.mute.setText('静音');self.mute.setCheckable(True);self.mute.toggled.connect(self.volume_changed);volume_row.addWidget(self.mute)
         self.volume=QtWidgets.QSlider(QtCore.Qt.Horizontal);self.volume.setObjectName('volumeSlider');self.volume.setRange(0,100);self.volume.setValue(80);self.volume.setFixedWidth(140);self.volume.valueChanged.connect(self.volume_changed);self.volume.setToolTip('实时音量；0% 停发静音，变化带平滑渐变')
-        controls.addWidget(self.volume);self.volume_label=label('80%');self.volume_label.setFixedWidth(37);controls.addWidget(self.volume_label);tl.addLayout(controls);content.addWidget(transport)
+        volume_row.addWidget(self.volume);self.volume_label=label('80%');self.volume_label.setFixedWidth(37);volume_row.addWidget(self.volume_label);tl.addLayout(controls);tl.addLayout(volume_row);content.addWidget(transport)
         log_head=QtWidgets.QHBoxLayout();log_toggle=QtWidgets.QToolButton();log_toggle.setText('运行日志 ▸');log_toggle.setCheckable(True);log_head.addWidget(log_toggle);log_head.addStretch();clear=QtWidgets.QToolButton();clear.setText('清空');log_head.addWidget(clear);content.addLayout(log_head)
         self.log_view=QtWidgets.QPlainTextEdit();self.log_view.setReadOnly(True);self.log_view.setMaximumBlockCount(300);self.log_view.setFixedHeight(64);self.log_view.hide()
         log_toggle.toggled.connect(lambda on:(self.log_view.setVisible(on),log_toggle.setText('运行日志 ▾' if on else '运行日志 ▸')))
@@ -307,26 +332,63 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         self.settings.setValue('baud',self.baud.currentData())
         if self.current_path and not self.loading and not self.player:self.start_conversion()
 
+    def encoder_changed(self):
+        beam=self.encoder_backend.currentData()!='legacy'
+        self.beam_budget.setVisible(beam);self.beam_hint.setVisible(beam)
+        self.beam_budget.blockSignals(True);self.beam_budget.setCurrentIndex(2 if self.encoder_backend.currentData()=='beam_quality' else 1);self.beam_budget.blockSignals(False)
+        self.processing_changed()
+
     def start_conversion(self):
         if self.loading or self.player:return
         self.clear_banner();self.loading=True;self.position=0.;self.conversion.setValue(0);self.convert_label.setText('正在转换音频…');self.cancel_button.show();self._update_controls()
-        path=self.current_path;source=self.current_source;profile=dict(self.profile);profile['baud']=self.baud.currentData();mode=self.mode.currentData()
+        path=self.current_path;source=self.current_source;profile=copy.deepcopy(self.profile);profile['baud']=self.baud.currentData();mode=self.mode.currentData()
+        backend=self.encoder_backend.currentData()
+        profile['encoder']=self.legacy_encoder if backend=='legacy' else backend
+        if backend!='legacy':
+            profile.update(beam_baseline_encoder=self.legacy_encoder,beam_volume=self.volume.value()/100,
+                           beam_settings={'budget_ratio':self.beam_budget.currentData()})
         profile.update(conditioning='music_loudness_lookahead_v2' if self.loudness.isChecked() else 'legacy',
                        continuous_carrier=self.continuous.isChecked(),soft_carrier_edges=True,
                        loudness_target_rms=self.loudness_level.currentData())
         if not self.predistortion_box.isChecked():profile.pop('predistortion',None)
         name='多声部演示乐曲.wav' if source is not None else Path(path).name
-        job=Job(lambda j:self.cache.convert(path,profile,mode,self.fit_path,progress=j.progress.emit,cancel_check=j.isInterruptionRequested,source=source,name=name),self)
+        track_id=self.current_track_id;track=copy.deepcopy(self.library.data['tracks'].get(track_id,{}))
+        enabled=track.get('calibration_enabled',True)
+        self.song_calibration_box.blockSignals(True);self.song_calibration_box.setChecked(enabled);self.song_calibration_box.blockSignals(False)
+        fit_path=self.fit_path
+        def perform(j):
+            model_sha=file_hash(fit_path,j.isInterruptionRequested)
+            source_sha=file_hash(path,j.isInterruptionRequested) if source is None else None
+            effective=resolve_profile(profile,track.get('calibration'),source_sha,mode,model_sha,enabled)
+            doc=self.cache.convert(path,effective,mode,fit_path,progress=j.progress.emit,cancel_check=j.isInterruptionRequested,source=source,name=name)
+            if source is None and (doc.metadata['source_commit']['source_sha256']!=source_sha or file_hash(path,j.isInterruptionRequested)!=source_sha):raise ValueError('转换期间歌曲文件已改变，请重新加载')
+            doc.metadata['song_context']=conversion_context(track_id,path,source_sha,profile,model_sha)
+            record=track.get('calibration')
+            state=('本曲已校准' if effective.get('_song_calibration') else '本曲校准已旁路' if record and not enabled
+                   else '源文件变化，本曲校准暂不适用' if record and record.get('source_sha256')!=source_sha
+                   else '设置变化，本曲校准暂不适用' if record else '本曲未校准')
+            doc.metadata['song_calibration_state']=state
+            return doc
+        job=Job(perform,self)
         self.conversion_job=job;self.jobs.append(job);job.progress.connect(lambda v:self.conversion.setValue(int(v*1000)))
+        self.conversion_started=time.monotonic()
+        if backend!='legacy':job.progress.connect(self.beam_progress)
         job.result.connect(self.converted);job.error.connect(self.conversion_failed);job.finished.connect(lambda:self._job_finished(job));job.start()
 
     def cancel_conversion(self):
         if self.conversion_job:self.conversion_job.requestInterruption()
 
+    def beam_progress(self,value):
+        elapsed=time.monotonic()-self.conversion_started
+        remaining=elapsed*(1-value)/max(value,.001)
+        self.convert_label.setText(f'Beam离线预计算 · {value*100:.0f}% · 已用{elapsed:.1f}s · 预计剩余{remaining:.1f}s（估算）')
+
     def converted(self,doc):
         if self.pending_track:
             self.loading=False;self.conversion_job=None;self.cancel_button.hide();return
         self.doc=doc;self.loading=False;self.conversion_job=None;self.cancel_button.hide();self.conversion.setValue(1000);self.clear_banner()
+        self.calibration_status.setText(doc.metadata.get('song_calibration_state','本曲未校准'))
+        if self.profile_migration_warning:self.fail(self.profile_migration_warning)
         self.file_label.setText(doc.name);self.file_label.setToolTip(doc.path)
         size=doc.metadata['total_bytes']/1024
         self.file_info.setText(f'{duration_text(doc.duration)}  ·  16 kHz 单声道  ·  {size:,.1f} KiB 串口数据  ·  {len(doc.segments)} 段')
@@ -334,6 +396,13 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         status=(f'已读取缓存 · {cached["seconds"]:.2f} 秒' if cached.get('hit') else '转换完成 · 已缓存' if cached.get('persisted') else '转换完成')
         self.convert_label.setText(status);self.time_label.setText('00:00 / '+duration_text(doc.duration));self.byte_label.setText(f'{doc.metadata["total_bytes"]:,} B')
         self.log(f'{status}：{doc.name} · {doc.duration:.2f}s · {doc.profile["baud"]} baud · {doc.metadata["total_bytes"]:,} 字节')
+        if doc.metadata.get('beam'):
+            b=doc.metadata['beam'];ratio=1-b['returned_SSE']/max(b['baseline_SSE'],1e-30)
+            suffix='；已返回原基线：'+str(b['fallback_reason']) if b['fallback'] else ''
+            self.convert_label.setText(f'{status} · 电流SSE减少{ratio*100:.1f}%'+suffix)
+            self.model_badge.setText('measured M2 electrical current model');self.model_badge.setWordWrap(True)
+            self.log(f'Beam {doc.profile["beam_volume"]*100:.0f}%固定音量；模型{b["model_hash"][:12]}；耗时{b["seconds"]:.2f}s{suffix}')
+        else:self.model_badge.setText('M2 负载先验  /  音乐优化')
         if cached.get('error'):self.log('缓存写入不可用，本次播放不受影响：'+cached['error'])
         self._update_controls();self.reset_plots()
         self.library_conversion_done(doc)
@@ -392,6 +461,29 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         if not hasattr(self,'volume_label'):return
         self.volume_label.setText(f'{self.volume.value()}%');self.settings.setValue('volume',self.volume.value())
         if self.player:self.player.volume=self.volume.value()/100;self.player.muted=self.mute.isChecked()
+        if not self.player and hasattr(self,'encoder_backend') and self.encoder_backend.currentData()!='legacy' and not self.loading and self.doc and abs(self.volume.value()/100-self.doc.profile.get('beam_volume',-1))>1e-9:
+            self.play_button.setEnabled(False);self.convert_label.setText('Beam音量已变化，请点击“重新编码”后播放')
+            if not hasattr(self,'beam_volume_timer'):
+                self.beam_volume_timer=QtCore.QTimer(self);self.beam_volume_timer.setSingleShot(True);self.beam_volume_timer.timeout.connect(self.start_conversion)
+            if not self.mute.isChecked():self.beam_volume_timer.start(350)
+
+    def show_beam_ab(self):
+        if not self.doc or not self.doc.metadata.get('beam'):return
+        doc=self.doc
+        self.run_job(lambda j:beam_ab_preview(doc,self.fit_path),self.beam_ab_ready)
+
+    def beam_ab_ready(self,result):
+        dialog=QtWidgets.QDialog(self);dialog.setWindowTitle('同前端、同音量 · Beam / 原有编码 A/B');dialog.resize(900,620)
+        layout=QtWidgets.QVBoxLayout(dialog);d=result['diagnostics'];n=max(1,d['total_frames']*10)
+        info=label(f'整曲电流模型 RMSE：原有 {np.sqrt(d["baseline_SSE"]/n):.6f} → 当前 {np.sqrt(d["returned_SSE"]/n):.6f}\n'
+                   f'同增益预览：前{result["preview_seconds"]:.3f}s的末20ms与频谱；非麦克风数据，不代表THD/SPL改善。')
+        info.setWordWrap(True);layout.addWidget(info)
+        wave=pg.PlotWidget();wave.setLabel('left','预测电流','mA');wave.setLabel('bottom','时间','s');wave.addLegend()
+        for name,key,color in [('目标','target_mA','#aaaaaa'),('原有','baseline_mA','#ebae52'),('当前Beam/兜底','current_mA','#62b5e5')]:wave.plot(result['time_s'],result[key],pen=color,name=name)
+        spectrum=pg.PlotWidget();spectrum.setLabel('left','峰值电流','dB re 1mA');spectrum.setLabel('bottom','频率','Hz');spectrum.addLegend()
+        for name,color in [('目标','#aaaaaa'),('原有','#ebae52'),('Beam','#62b5e5')]:spectrum.plot(result['frequency_Hz'],20*np.log10(np.maximum(result['spectra'][name],1e-10)),pen=color,name=name)
+        spectrum.setXRange(0,10000,padding=0);layout.addWidget(wave);layout.addWidget(spectrum)
+        self.beam_ab_dialog=dialog;dialog.show()
 
     def export_data(self):
         if not self.doc:return
@@ -407,13 +499,17 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         if not path:return
         try:
             self.profile=validate_profile(json.loads(Path(path).read_text(encoding='utf-8-sig')))
+            self.profile.pop('_song_calibration',None)
+            self.legacy_encoder=self.profile.get('beam_baseline_encoder','bit_feedback_uart_v1') if self.profile['encoder'].startswith('beam_') else self.profile['encoder']
             self.settings.setValue('profile_path',path)
+            self.settings.setValue('global_profile_origin','manual_import')
+            self.profile_migration_warning=None
             if not self.profile.get('predistortion') and self.profile.get('available_predistortion'):self.profile['predistortion']=self.profile['available_predistortion']
             self.predistortion_box.blockSignals(True);self.predistortion_box.setChecked(bool(self.profile.get('predistortion')) and self.profile.get('predistortion_default_enabled',True));self.predistortion_box.blockSignals(False)
             self.loudness_level.blockSignals(True)
             self.loudness_level.setCurrentIndex(min(range(3),key=lambda i:abs(self.loudness_level.itemData(i)-self.profile.get('loudness_target_rms',.32))))
             self.loudness_level.blockSignals(False)
-            self.mode.setCurrentIndex(0);self.model_badge.setText('自定义音乐补偿配置');self.log('配置已导入：'+Path(path).name)
+            self.mode.setCurrentIndex(0);self.model_badge.setText('手动导入的全局补偿');self.log('全局配置已导入（所有歌曲的原补偿）：'+Path(path).name)
             if self.current_path:self.start_conversion()
         except Exception as e:self.fail('配置无效：'+str(e))
 
@@ -429,35 +525,59 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         if not self.last_recording:return
         folder=self.last_recording.parent
         try:
-            meta=json.loads((folder/'playback.json').read_text(encoding='utf-8'))
-            recording=json.loads((folder/'recording.json').read_text(encoding='utf-8'))
-            if not meta['completed'] or meta['paused']:raise ValueError('拟合需要连续完整播放；请勿中途暂停或停止')
-            if recording['clipped_fraction']>0 or recording['portaudio_status']:raise ValueError('这次录音存在削波或采集异常，请重新录制')
+            context,meta=validate_recording(folder,self.last_recording)
+            self.library.calibration_target(context)
+            if file_hash(self.fit_path)!=context['model_sha256']:raise ValueError('录音后模型配置已改变，请重新录音')
             ref_rate,reference=wavfile.read(folder/'reference_processed.wav')
+            if ref_rate!=FS:raise ValueError('录音参考采样率不匹配')
             sr,capture=wavfile.read(self.last_recording)
             if len(reference)<2*FS or np.sqrt(np.mean(reference**2))<1e-6:raise ValueError('请使用至少2秒有声音乐完成一次同步录音')
             a=int(meta['record_source_start_s']*sr);capture=capture[a:a+int(len(reference)/FS*sr)]
             ratio=Fraction(FS,int(sr));capture=resample_poly(capture,ratio.numerator,ratio.denominator)
             if len(capture)<len(reference)*.95:raise ValueError('录音长度不足')
         except Exception as e:self.fail('无法拟合：'+str(e));return
-        self.loading=True;self._update_controls();self.convert_label.setText('正在按整段音乐拟合补偿…');self.log('开始整段音乐宽带拟合；新配置需要换曲验证。')
+        recording_path=Path(self.last_recording);fit_path=self.fit_path;prior=copy.deepcopy(context['actual_profile'])
+        self.loading=True;self.cancel_button.show();self._update_controls();self.convert_label.setText('正在拟合录音对应歌曲…');self.log('开始本曲录音校准，仅绑定录音所用歌曲。')
         def done(result):
-            self.profile,analysis=result
-            dest=self.root/'profiles';dest.mkdir(exist_ok=True)
-            path=dest/('music_fit_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'.json')
-            path.write_text(json.dumps(self.profile,ensure_ascii=False,indent=2),encoding='utf-8')
-            self.settings.setValue('profile_path',str(path))
-            path.with_suffix('.analysis.json').write_text(json.dumps(analysis,ensure_ascii=False,indent=2),encoding='utf-8')
-            self.loading=False;self.model_badge.setText('本机音乐拟合 · 待跨曲验证');self.mode.setCurrentIndex(0);self.log('拟合完成，已保存：'+str(path));self.start_conversion();self._update_controls()
-        def failed(text):self.loading=False;self.fail(text)
-        self.run_job(lambda j:fit_recording(reference,capture,self.profile,self.fit_path),done,failed)
+            try:
+                if job.isInterruptionRequested() or self.exit_pending:raise InterruptedError('操作已取消，未应用校准')
+                if validate_recording(folder,recording_path)[0]!=context:raise ValueError('拟合期间录音来源已改变，未应用校准')
+                if file_hash(fit_path)!=context['model_sha256']:raise ValueError('拟合期间模型配置已改变，未应用校准')
+                fitted,analysis=result;fitted=validate_profile(fitted)
+                bound=self.library.bind_calibration(context,fitted,recording_path,analysis)
+                self.library_panel.refresh_tracks();self.log('本曲校准已随歌单保存；其他歌曲补偿不变。')
+                self.loading=False;self.conversion_job=None;self.cancel_button.hide()
+                if self.current_track_id==bound and not self.pending_track:self.start_conversion()
+                self._update_controls()
+            except Exception as e:failed(str(e))
+        def failed(text):
+            self.loading=False;self.conversion_job=None;self.cancel_button.hide();self.fail(text)
+        def perform(j):
+            if j.isInterruptionRequested():raise InterruptedError('操作已取消')
+            result=fit_recording(reference,capture,prior,fit_path)
+            if j.isInterruptionRequested():raise InterruptedError('操作已取消')
+            return result
+        job=self.run_job(perform,done,failed);self.conversion_job=job
+
+    def song_calibration_changed(self,enabled):
+        if not getattr(self,'current_track_id',None):return
+        try:
+            data=copy.deepcopy(self.library.data);data['tracks'][self.current_track_id]['calibration_enabled']=enabled
+            self.library.commit(data)
+            if not self.loading and not self.player:self.start_conversion()
+        except Exception as e:self.fail(str(e))
 
     def _update_controls(self):
         playing=self.player is not None;connected=self.link.connected;busy=self.loading
+        self.song_calibration_box.setEnabled(not playing and not busy and self.current_track_id is not None)
         self.loudness.setEnabled(not playing and not busy);self.continuous.setEnabled(not playing and not busy)
         self.loudness_level.setEnabled(not playing and not busy and self.loudness.isChecked())
         self.predistortion_box.setEnabled(not playing and not busy and bool(self.profile.get('predistortion')))
         self.ports.setEnabled(not connected and not playing);self.baud.setEnabled(not playing and not busy);self.mode.setEnabled(not playing and not busy)
+        self.encoder_backend.setEnabled(not playing and not busy);self.beam_budget.setEnabled(not playing and not busy)
+        prepared_beam=self.doc is not None and bool(self.doc.metadata.get('beam'))
+        self.ab_button.setEnabled(prepared_beam and not playing and not busy)
+        self.volume.setEnabled(not (playing and prepared_beam) and not (busy and self.encoder_backend.currentData()!='legacy'))
         self.connect_button.setText('断开串口' if connected else '连接串口');self.connection.setText(('●  '+self.link.name+' 已连接') if connected else '●  未连接')
         self.connection.setStyleSheet('color:#83c99e;' if connected else 'color:#93999f;')
         self.play_button.setEnabled((self.doc is not None and not busy and connected) or playing)
@@ -503,7 +623,8 @@ class MainWindow(LibraryController,QtWidgets.QMainWindow):
         elif self.doc:
             a=self.doc.decoded if source=='decoded' else self.doc.processed
             end=min(len(a),max(32 if self.player else 4096,int(self.position*FS)))
-            y=a[max(0,end-4096):end]*(0 if self.mute.isChecked() else self.volume.value()/100)
+            gain=0 if self.mute.isChecked() else (1. if source=='decoded' and self.doc.metadata.get('beam') else self.volume.value()/100)
+            y=a[max(0,end-4096):end]*gain
             if source!='decoded' and self.doc.quadratic_correction is not None:
                 gain=0 if self.mute.isChecked() else self.volume.value()/100
                 y=self.doc.base_processed[max(0,end-4096):end]*gain+self.doc.quadratic_correction[max(0,end-4096):end]*gain**2
@@ -556,10 +677,33 @@ def self_test(path):
     first=ConversionCache(cache_folder).convert('embedded-demo.wav',profile,source=x[:FS*2])
     cached=ConversionCache(cache_folder).convert('embedded-demo.wav',profile,source=x[:FS*2])
     cache_ok=cached.metadata['cache'].get('tier')=='disk' and [s['data'] for s in first.segments]==[s['data'] for s in cached.segments]
+    beam_checks=[]
+    for baud in (460800,921600):
+        for backend in ('beam_fast','beam_quality'):
+            bp=dict(profile,baud=baud,encoder=backend,beam_volume=.8,beam_settings={'budget_ratio':300.})
+            candidate=convert('beam-selftest.wav',bp,source=x[:FS//5],fit_path=ASSETS/'impedance_fit.json')
+            bm=candidate.metadata['beam']
+            dest=Path(path).parent/f'beam_selftest_{backend}_{baud}'
+            exported=export_document(candidate,dest,.8)
+            beam_checks.append(dict(baud=baud,preset=backend,compiled=bm['compiled'],bytes=candidate.metadata['total_bytes'],
+                nonregression=bm['returned_SSE']<=bm['baseline_SSE']+1e-12,manifest_exists=exported.exists(),
+                optimized_frames=bm['optimized_frames'],total_frames=bm['total_frames'],
+                budget_hit=bm['budget_hit'],kernel_backend=bm['kernel_backend'],
+                fallback=bm['fallback'],model_hash=bm['model_hash']))
+    attestation_path=ASSETS/'beam_backend.json'
+    attestation=json.loads(attestation_path.read_text()) if attestation_path.is_file() else {}
+    from .._beam_kernels import SELECTOR_NUMBA_VERSION,SELECTOR_SOURCE_SHA256
+    official_backend_ok=(attestation==dict(numba_version=SELECTOR_NUMBA_VERSION,arraymath_sha256=SELECTOR_SOURCE_SHA256)
+        and all(r['kernel_backend']['name']=='topw_selector_v1' and r['kernel_backend']['scratch_calls']>0
+                and r['kernel_backend']['original_calls']==0 and not r['budget_hit'] and not r['fallback']
+                and r['optimized_frames']==r['total_frames'] for r in beam_checks))
     report=dict(version=VERSION,frozen=bool(getattr(sys,'frozen',False)),assets_present=True,
                 decoded_samples=len(doc.decoded),bytes=doc.metadata['total_bytes'],fit_bins=fit['excited_frequency_bins'],
                 predistortion_self_test=pd_ok,predistortion_default_enabled=bool(profile.get('predistortion_default_enabled',False)),
-                persistent_cache_self_test=cache_ok,success=doc.duration==2 and fit['excited_frequency_bins']>50 and pd_ok and cache_ok)
+                persistent_cache_self_test=cache_ok,beam_self_test=beam_checks,selector_attestation=attestation,
+                official_backend_self_test=official_backend_ok,
+                success=doc.duration==2 and fit['excited_frequency_bins']>50 and pd_ok and cache_ok and all(r['nonregression'] and r['manifest_exists'] and r['bytes']>0 for r in beam_checks)
+                    and (not getattr(sys,'frozen',False) or official_backend_ok))
     Path(path).write_text(json.dumps(report,indent=2),encoding='utf-8')
     if not report['success']:raise RuntimeError('Self test failed')
 
@@ -571,9 +715,20 @@ def main():
     parser.add_argument('--qa-source',type=Path,help=argparse.SUPPRESS)
     parser.add_argument('--qa-predistortion',action='store_true',help=argparse.SUPPRESS)
     parser.add_argument('--state-report',type=Path,help=argparse.SUPPRESS)
+    parser.add_argument('--qa-calibration',type=Path,help=argparse.SUPPRESS)
+    parser.add_argument('--beam-benchmark',type=Path,help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.self_test:self_test(args.self_test);return
     app=QtWidgets.QApplication(sys.argv[:1]);app.setApplicationName('UART Audio Studio');app.setOrganizationName('ZipLab')
+    app.setStyle('Fusion');app.setFont(QtGui.QFont('Microsoft YaHei UI',9))
+    if args.beam_benchmark:
+        if args.data_dir is None:parser.error('--beam-benchmark requires isolated --data-dir')
+        from .beam_benchmark import run
+        run(args.data_dir,args.beam_benchmark,ASSETS,VERSION);return
+    if args.qa_calibration:
+        if args.data_dir is None:parser.error('--qa-calibration requires isolated --data-dir')
+        from .calibration_qa import run
+        run(args.data_dir,args.qa_calibration);return
     root=data_root(args.data_dir);root.mkdir(parents=True,exist_ok=True)
     if args.state_report:
         from .library import LibraryStore
@@ -584,7 +739,6 @@ def main():
     instance_lock=QtCore.QLockFile(str(root/'application.lock'))
     if not instance_lock.tryLock(0):
         QtWidgets.QMessageBox.information(None,'UART Audio Studio','同一数据目录的播放器已经打开。请切回现有窗口，避免多个窗口覆盖歌单。\n'+str(root));return
-    app.setStyle('Fusion');app.setFont(QtGui.QFont('Microsoft YaHei UI',9))
     window=MainWindow(args.data_dir);window.show();QtCore.QTimer.singleShot(100,window.ensure_visible)
     if args.wav:QtCore.QTimer.singleShot(200,lambda:window.load_file(str(args.wav)))
     elif not args.qa:

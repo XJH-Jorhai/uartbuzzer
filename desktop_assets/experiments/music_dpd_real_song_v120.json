@@ -44,9 +44,7 @@
   "continuous_carrier": true,
   "soft_carrier_edges": true,
   "evidence": "Real-song 45-53s and 76-84s; independent original composition did not improve. Do not enable globally.",
-  "source_run": "%USERPROFILE%\\Desktop\\uartbuzzer\\results\\boost_v111_fast",
   "model_prior": {
-    "load_fit_file": "%USERPROFILE%\\Desktop\\uartbuzzer\\results\\study\\20261028_221317\\fit\\fit.json",
     "load_fit_sha256": "c955f9ad66f8d24c8d13b12eb31f0c9949fa3d4bb938647dd9eadf432376c604",
     "model": "M2",
     "Rlimit_assumed_from_existing_hardware_records_ohm": 55.0,

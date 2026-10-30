@@ -1,26 +1,12 @@
-# UART Audio Studio / CH343 UART 蜂鸣器播放器
+# UART Audio Studio 1.4.1
 
-使用 CH343 的 5 V TTL UART 8N1 字节流驱动电磁蜂鸣器的 Windows 播放器，以及实测复阻抗拟合、UART 编码和 SPICE 离线验证工具。
+用于 CH343 5 V TTL UART 8N1 电磁蜂鸣器的 Windows 播放器，包含 WAV 文件库、歌单、长期转换缓存、波形、FFT、录音与单曲校准。
 
-公开稳定版为 **1.3.1**。Beam/MPC 与可微分编码器仍在独立研究，尚未作为稳定功能发布。
+从 [GitHub Releases](https://github.com/XJH-Jorhai/uartbuzzer/releases) 下载 `UARTAudioStudio.exe` 或 `UARTAudioStudio-portable.zip`。便携包解压后运行 EXE，保持 `_internal` 和 `LICENSES` 目录完整。启动不会自动打开串口或麦克风。内置演示乐曲为项目原创。
 
-## 下载和使用
+默认编码器为 B0。可选 Beam 快速档、高质量档通过相同设备电流模型优化 UART 字节。1.4.1 对 CPU 搜索做精确 TopW/SIMD 和计算复用：既有离线对照中快速档约 1.20–1.35 倍、高质量档约 1.50–1.62 倍；未缩小搜索或降低精度，首次 JIT 仍需时间。电流模型不是校准声压模型。公开包是删除私有来源记录、整理许可后的重新封装，具有新的二进制哈希；性能证据来自同一 DSP 源码的验收构建。
 
-在 [GitHub Releases](https://github.com/XJH-Jorhai/uartbuzzer/releases) 下载单文件 `UARTAudioStudio.exe`、可替换 Qt 动态库的 `UARTAudioStudio-portable.zip` 或对应代码 `UARTAudioStudio-source.zip`。
-
-无需安装 Python、VS Code 或 ngspice。启动不自动连接串口或麦克风。
-
-1. 导入 WAV 或文件夹，在文件库创建歌单。
-2. 选择 CH343 串口并连接后播放。支持实时音量、静音、波形、FFT及麦克风录音。
-3. 默认**单曲播放，播完停止**，可选顺序、列表循环、单曲循环或随机。
-
-转换结果长期保存为文件并关联歌单，同一音频和配置再次载入不重新编码。数据默认位于 `%LOCALAPPDATA%\ZipLab\UART Audio Studio`，界面提供入口。原 WAV 保留原位置，移除列表引用不会删除它。
-
-见 [应用说明](docs/desktop_app.md)、[歌单和缓存](docs/persistence.md)。
-
-## 从源码运行
-
-推荐 Python 3.12 x64，在项目根目录运行：
+从源码运行（Windows x64、Python 3.12）：
 
 ```powershell
 python -m venv .venv
@@ -28,42 +14,17 @@ python -m venv .venv
 .venv\Scripts\python desktop_app.py
 ```
 
-内置原创多声部演示乐曲。支持整数或浮点 PCM WAV、中文路径，单首最长10分钟。
-
-## 测试和构建
+测试与构建：
 
 ```powershell
+.venv\Scripts\python -m pip install -r requirements-test.txt
 .venv\Scripts\python scripts/test_desktop_only.py
-.venv\Scripts\python scripts/run_tests.py
-.venv\Scripts\python scripts/qa_library.py
-.venv\Scripts\python scripts/build_desktop.py --onefile
-.venv\Scripts\python scripts/build_desktop.py
+.venv\Scripts\python scripts/build_desktop.py --out dist/single-v141 --work build/single-v141
+.venv\Scripts\python scripts/build_desktop.py --onedir --out dist/portable-v141 --work build/portable-v141
 ```
 
-完整测试包含 ngspice，需要安装 CLI 或设置 `NGSPICE_DLL` 指向兼容64位共享库。桌面运行、打包和第一条桌面/DSP测试不需要 ngspice，也不会打开串口或麦克风。稳定快照已通过74项软件检查及最终 EXE 自检和歌单重启验证。
+每次构建使用新的输出和工作目录。构建器复制源码后在工作目录准备资产，不改输入源码，不要求已有实验结果。`--snapshot` 可指定另一个完整源码目录。`requirements-build.txt` 提供单独构建依赖；测试命令不打开设备。Numba 及私有选择辅助函数有版本和源码 SHA 守卫，替换它们需重新验证；不支持时运行时保留原始搜索回退。
 
-离线研究入口 `python run.py --quick` 不打开串口。自有测量 CSV 在 `measurements/`，模型在 `desktop_assets/impedance_fit.json` 与 `spice/`。
+操作说明见 [应用说明](docs/desktop_app.md)。许可见 [第三方声明](THIRD_PARTY_NOTICES.md)。项目原创代码使用 MIT；Qt/PySide6、Numba、LLVM 等保持原许可。
 
-## 项目布局
-
-| 路径 | 内容 |
-|---|---|
-| `src/uart_buzzer/desktop/` | PySide6界面、歌单、转换文件、串口和录音 |
-| `src/uart_buzzer/` | 音频处理、8N1编码、阻抗拟合、SPICE和评测 |
-| `desktop_assets/` | 内置模型、配置、图标、第三方许可 |
-| `measurements/` | 项目自有扫频和DCR CSV |
-| `scripts/`, `tests/` | 稳定版构建、测试和验收 |
-| `research/` | 本地并行研究，未完成内容未纳入首发 |
-| `results/`, `release/`, `tmp/`, `.venv*/` | 本地产物，Git忽略 |
-
-见 [协作规范](AGENTS.md) 和 [目录归属](docs/workspace.md)。公开内容不含用户原曲、录音、个人歌单、处理缓存、文献PDF和下载的作者源码包。
-
-## 适用边界
-
-稳定配置对应 CJ3401 高边、5V、55Ω限流、1Ω采样在续流回路内，Rg/Rgs=100Ω/10kΩ 的实验平台。M2 是实测小信号负载模型，预测线圈电流，不能当作声压预测。
-
-音乐使用带限、宽带补偿和平滑响度控制，未以2kHz单音代替整曲验证。预失真候选跨曲验证未通过，默认关闭。连续载波增加休止期耗电，软件停止不替代失电保护。绝对SPL、全频高保真及任意硬件温升未认证。
-
-## 许可
-
-原创代码、自有测量数据采用 [MIT](LICENSE)。第三方按各自许可，见 [第三方声明](THIRD_PARTY_NOTICES.md)。MIT不重新授权第三方文献、下载代码或商业歌曲。
+可选离线阻抗/SPICE 工具：安装 `requirements-offline.txt` 后运行 `python run.py --quick`；完整 SPICE 测试另需 ngspice。`measurements/` 是项目自有测量数据，不包含音乐或录音。硬件播放与离线测试分开进行。

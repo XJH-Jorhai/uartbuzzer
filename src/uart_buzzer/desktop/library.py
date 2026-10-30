@@ -116,6 +116,9 @@ class LibraryStore:
         target=next((p for p in data['playlists'] if p['id']==('default' if playlist=='all' else playlist)),data['playlists'][0])
         for item in tracks:
             item=copy.deepcopy(item);i=item['id'];old=data['tracks'].get(i)
+            if old:
+                for field in ('calibration','identity_aliases','calibration_enabled'):
+                    if field in old:item[field]=copy.deepcopy(old[field])
             if not old and len(data['tracks'])>=10000:raise ValueError('文件库最多保存 10000 首歌曲')
             if old and old.get('size')==item.get('size') and old.get('mtime_ns')==item.get('mtime_ns'):
                 item['cache_keys']=old.get('cache_keys',[]);item['prepared_files']=old.get('prepared_files',[])
@@ -182,12 +185,33 @@ class LibraryStore:
     def relink(self,old,path):
         item=probe_track(path)
         if item['error']:raise ValueError(item['error'])
-        data=copy.deepcopy(self.data);new=item['id'];data['tracks'][new]=item
+        data=copy.deepcopy(self.data);new=item['id'];previous=data['tracks'].get(old,{})
+        if new!=old and new in data['tracks']:raise ValueError('目标歌曲已在库中，不能合并两首歌曲的校准')
+        for field in ('calibration','cache_keys','prepared_files','calibration_enabled'):
+            if field in previous:item[field]=copy.deepcopy(previous[field])
+        item['identity_aliases']=list(dict.fromkeys(previous.get('identity_aliases',[])+[old]))
+        data['tracks'][new]=item
         if old!=new:data['tracks'].pop(old,None)
         data['order']=list(dict.fromkeys(new if i==old else i for i in data['order']))
         for p in data['playlists']:p['tracks']=list(dict.fromkeys(new if i==old else i for i in p['tracks']))
         if data['current']==old:data['current']=new
         self.commit(data);return new
+
+    def calibration_target(self,context):
+        from .song_calibration import file_hash
+        candidates=[i for i,t in self.data['tracks'].items()
+                    if i==context['track_id'] or context['track_id'] in t.get('identity_aliases',[])]
+        if len(candidates)!=1:raise ValueError('录音所用歌曲已移除或来源不明确，未应用校准')
+        i=candidates[0]
+        if file_hash(self.data['tracks'][i]['path'])!=context['source_sha256']:
+            raise ValueError('录音后歌曲文件内容已改变，未应用校准')
+        return i
+
+    def bind_calibration(self,context,profile,recording_path,analysis=None):
+        from .song_calibration import make_record
+        i=self.calibration_target(context);data=copy.deepcopy(self.data)
+        data['tracks'][i]['calibration']=make_record(context,profile,recording_path,analysis)
+        self.commit(data);return i
 
     def converted(self,i,doc,prepared_file=None):
         if i not in self.data['tracks']:return

@@ -90,11 +90,22 @@ class LibraryPanel(QtWidgets.QWidget):
             elif action==remove:self.owner.library.remove(ids)
             elif action==relink:
                 path,_=QtWidgets.QFileDialog.getOpenFileName(self,'重新定位 WAV','','WAV (*.wav)')
-                if path:self.owner.library.relink(ids[0],path)
+                if path:self.owner.relink_track(ids[0],path)
             self.refresh_tracks()
         except Exception as e:self.owner.fail(str(e))
 
 class LibraryController:
+    def relink_track(self,old,path):
+        new=self.library.relink(old,path)
+        self.queue_ids=list(dict.fromkeys(new if i==old else i for i in self.queue_ids))
+        if self.pending_track and self.pending_track[0]==old:
+            self.pending_track=(new,self.pending_track[1])
+        if self.current_track_id==old:
+            self.current_track_id=new
+            self.request_track(new,False)
+        self.library_panel.refresh_tracks()
+        return new
+
     def init_library(self):
         self.library=LibraryStore(self.root/'library.json');self.current_track_id=None;self.queue_ids=[]
         self.pending_track=None;self.autoplay_pending=False;self.queue_active=False;self.importing_library=False

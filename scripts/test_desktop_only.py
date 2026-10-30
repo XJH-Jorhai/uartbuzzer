@@ -1,11 +1,13 @@
-"""Run deterministic desktop/DSP tests without hardware or ngspice."""
-import os,sys,unittest
+"""Run offline desktop/DSP tests; no device access or ngspice required."""
+import os,sys,tempfile,uuid
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
-for folder in ('tmp/plot_deps','tmp/audio_deps','tmp/gui_deps','tmp/sim_deps','src','tests'):
-    sys.path.insert(0,str(ROOT/folder))
-os.environ.setdefault('MPLCONFIGDIR',str(ROOT/'tmp/matplotlib_cache'))
-names=['test_acoustic','test_conversion_cache','test_desktop','test_edge_codec','test_library','test_music','test_nonlinear',
-       'test_study.UARTTests','test_study.NetworkTests','test_study.FittingTests']
-result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(names))
-raise SystemExit(not result.wasSuccessful())
+os.chdir(ROOT)
+sys.path.insert(0,str(ROOT/'src'))
+os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+os.environ.setdefault('NUMBA_CACHE_DIR',str(ROOT/'tmp/numba_test_cache'))
+temp=ROOT/'tmp'/('offline-tests-'+uuid.uuid4().hex)
+temp.mkdir(parents=True)
+tempfile.tempdir=str(temp)
+import pytest
+raise SystemExit(pytest.main(['tests','-q','-k','not SpiceIntegrationTests','--basetemp',str(temp/'pytest')]))

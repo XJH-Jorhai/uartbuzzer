@@ -23,6 +23,8 @@ class AudioDocument:
     metadata:dict
     base_processed:np.ndarray|None=None
     quadratic_correction:np.ndarray|None=None
+    baseline_segments:list|None=None
+    beam_pcm:np.ndarray|None=None
 
     @property
     def duration(self):return len(self.processed)/FS
@@ -42,8 +44,17 @@ def validate_profile(profile):
     bias=float(p.get('bias',.3));amplitude=float(p.get('amplitude',.18))
     if not (amplitude>0 and .1<=bias-amplitude and bias+amplitude<=.9):raise ValueError('配置超出UART密度范围')
     p['bias']=bias;p['amplitude']=amplitude;p['gains_db']=gains.tolist();p.setdefault('encoder','bit_feedback_uart_v1')
-    if p.get('encoder','bit_feedback_uart_v1') not in ('bit_feedback_uart_v1','frame_density_feedback','frame_aware_sigma_delta','edge_feedback_uart_v1'):
+    if p.get('encoder','bit_feedback_uart_v1') not in ('bit_feedback_uart_v1','frame_density_feedback','frame_aware_sigma_delta','edge_feedback_uart_v1','beam_fast','beam_quality','beam_research'):
         raise ValueError('未知编码器')
+    if p['encoder'].startswith('beam_'):
+        from ..beam import settings_for,LEGACY_MODES
+        from dataclasses import asdict
+        p['beam_settings']=asdict(settings_for(p['encoder'],p.get('beam_settings')))
+        p.setdefault('beam_baseline_encoder','bit_feedback_uart_v1')
+        if p['beam_baseline_encoder'] not in LEGACY_MODES:raise ValueError('Beam基线必须为原有编码器')
+        volume=float(p.get('beam_volume',1.))
+        if not np.isfinite(volume) or not 0<=volume<=1:raise ValueError('Beam预计算音量需要0到100%')
+        p['beam_volume']=volume
     edge=p.get('edge_model') or {}
     if any(k not in ('on_loss','off_tail','bias_offset') or not np.isfinite(v) or abs(v)>(.15 if k=='bias_offset' else .4) or (k!='bias_offset' and v<0) for k,v in edge.items()):
         raise ValueError('电路边沿模型超出有界范围')
@@ -83,25 +94,47 @@ def convert(path,profile,mode='music',fit_path=None,progress=None,cancel_check=N
         base=y.astype(np.float32);y,correction,pd_meta=predistort(y,p['predistortion'])
         correction=correction.astype(np.float32)
     if progress:progress(.15)
-    segments,codec=encode_pcm(y,baud=p['baud'],bias=p['bias'],amplitude=p['amplitude'],
-             method=p.get('encoder','bit_feedback_uart_v1'),
+    is_beam=p['encoder'].startswith('beam_');beam_meta=None
+    prepared=y
+    if is_beam:
+        # Preserve the SAME high precision front-end output used by the old encoder.
+        volume=p['beam_volume']
+        prepared=y
+    segments,codec=encode_pcm(prepared,baud=p['baud'],bias=p['bias'],amplitude=p['amplitude'],
+             method=p.get('beam_baseline_encoder','bit_feedback_uart_v1') if is_beam else p.get('encoder','bit_feedback_uart_v1'),
              continuous=p.get('continuous_carrier',False),soft_edges=p.get('soft_carrier_edges',False),
              edge_model=p.get('edge_model'),
-             progress=(lambda v:progress(.15+.80*v)) if progress else None,cancel_check=cancel_check)
+             progress=(lambda v:progress(.15+(.05 if is_beam else .80)*v)) if progress else None,cancel_check=cancel_check)
+    if is_beam:
+        from ..beam import encode_segments
+        if fit_path is None:raise ValueError('Beam需要固定M2模型路径')
+        prepared=(base if base is not None else y.astype(np.float32)).astype(float)
+        baseline_segments,plan=live_baseline_plan(prepared,correction,segments,p,cancel_check)
+        result=encode_segments(prepared,baseline_segments,p,fit_path,progress=(lambda v:progress(.2+.75*v)) if progress else None,cancel_check=cancel_check,
+                               command_factory=plan.command,prep_hash=plan.digest())
+        segments=result.segments;beam_meta=result.diagnostics
+        beam_meta['live_target_blocks']=plan.records
+        beam_meta['baseline_path']='Actual LiveEncoder with 2048-frame Playback boundaries, fixed gain, original ramps and idle protocol'
+        codec=dict(codec,encoder=p['encoder'],beam=beam_meta,active_wire_s=result.expected_duration,
+                   real_idle_s=len(y)/FS-result.expected_duration)
+        codec.pop('segment_final_integral_errors',None)
     if cancel_check is not None and cancel_check():raise InterruptedError('Conversion cancelled')
     decoded=decode_segments(segments,len(y),p['baud'],p['bias'],p['amplitude'])
     digest=hashlib.sha256(np.asarray(x,dtype=np.float32).tobytes()).hexdigest()
     metadata=dict(conditioning=conditioning,predistortion=pd_meta,encoding=codec,mode=mode,source_PCM_sha256=digest,
                   total_bytes=sum(len(s['data']) for s in segments),sample_rate_Hz=FS,
                   reconstruction='frame density + 400–5000Hz digital bandpass; not measured coil current')
+    if beam_meta is not None:metadata['beam']=beam_meta
     if progress:progress(1.)
-    return AudioDocument(name or Path(path).name,str(path),x.astype(np.float32),y.astype(np.float32),decoded,segments,p,metadata,base,correction)
+    return AudioDocument(name or Path(path).name,str(path),x.astype(np.float32),y.astype(np.float32),decoded,segments,p,metadata,base,correction,
+                         baseline_segments if is_beam else None,prepared.copy() if is_beam else None)
 
 
 class LiveEncoder:
     """Preserves feedback and ramps volume across blocks. Zero volume emits no bytes."""
     def __init__(self,profile):
         self.p=validate_profile(profile);self.state=0.;self.gain=0.;self.last_idle=True;self.carrier=0.
+        if self.p['encoder'].startswith('beam_'):raise ValueError('Beam必须使用已完成的离线预计算字节')
         self._source_id=None;self._source_time=None
 
     def block(self,source,start_frame,frames,volume=1.,active=True,correction=None):
@@ -148,6 +181,113 @@ class LiveEncoder:
         return bytes(data),pcm
 
 
+class PrecomputedEncoder:
+    """Thin adapter to the existing playback protocol, with fixed prepared volume."""
+    def __init__(self,document):
+        self.doc=document;self.p=document.profile;self.volume=float(self.p['beam_volume'])
+        if not document.metadata.get('beam'):raise ValueError('Beam离线字节尚未完成')
+        self.bounds=[(round(s['start_s']*self.p['baud']/10),s) for s in document.segments]
+        self.cursor=0
+
+    def block(self,source,start_frame,frames,volume=1.,active=True,correction=None):
+        if not active or volume==0:return b'',np.zeros(frames*10,np.float32)
+        if abs(volume-self.volume)>1e-9:raise ValueError('Beam音量已改变，请先停止并重新编码')
+        while self.cursor<len(self.bounds) and start_frame>=self.bounds[self.cursor][0]+len(self.bounds[self.cursor][1]['data']):self.cursor+=1
+        if self.cursor>=len(self.bounds):return b'',np.zeros(frames*10,np.float32)
+        begin,seg=self.bounds[self.cursor];offset=start_frame-begin
+        if offset<0 or offset+frames>len(seg['data']):raise ValueError('Beam播放块跨越休止边界')
+        return seg['data'][offset:offset+frames],np.zeros(frames*10,np.float32)
+
+
+class LiveTargetPlan:
+    """Replay the old LiveEncoder's exact target without storing a bit-rate full-song array."""
+    def __init__(self,source,correction,profile,records):
+        self.source=np.asarray(source,float);self.correction=correction;self.p=profile;self.records=records
+        self.times=np.arange(len(source))/FS;self.starts=np.array([r['start'] for r in records],dtype=int)
+        self.memo={}
+
+    def command(self,start,frames):
+        baud=self.p['baud'];out=np.zeros(frames*10);stop=start+frames
+        first=max(0,int(np.searchsorted(self.starts,start,side='right'))-1)
+        for index in range(first,len(self.records)):
+            r=self.records[index];a=r['start'];b=a+r['frames']
+            if a>=stop:break
+            if b<=start:continue
+            target=self.memo.get(index)
+            if target is None:
+                bt=(np.arange(a*10,b*10)+.5)/baud;raw=np.interp(bt,self.times,self.source)
+                fade=min(len(raw),max(1,int(baud*.01)))
+                ramp=np.r_[np.linspace(r['gain_start'],r['gain_end'],fade),np.full(len(raw)-fade,r['gain_end'])]
+                pcm=raw*ramp
+                if self.correction is not None:pcm+=np.interp(bt,self.times,self.correction)*ramp**2
+                target=self.p['bias']+self.p['amplitude']*pcm
+                if self.p.get('soft_carrier_edges',False):
+                    nf=min(len(raw),max(1,int(baud*.016)))
+                    edge=np.r_[np.linspace(r['carrier_start'],1.,nf),np.ones(len(raw)-nf)]
+                    edge=np.minimum(edge,np.clip((len(self.source)/FS-bt)/.016,0,1));target=.1+(target-.1)*edge
+                if len(self.memo)>6:self.memo.clear()
+                self.memo[index]=target
+            lo=max(start,a);hi=min(stop,b);out[(lo-start)*10:(hi-start)*10]=target[(lo-a)*10:(hi-a)*10]
+        return out
+
+    def digest(self):
+        h=hashlib.sha256(self.source.astype(np.float64).tobytes())
+        if self.correction is not None:h.update(np.asarray(self.correction).tobytes())
+        h.update(json.dumps(dict(records=self.records,baud=self.p['baud'],bias=self.p['bias'],amplitude=self.p['amplitude'],soft_edges=self.p.get('soft_carrier_edges',False)),sort_keys=True).encode())
+        return h.hexdigest()
+
+
+def live_baseline_plan(source,correction,segments,profile,cancel_check=None):
+    """Exactly the existing Playback.run frame boundaries, with no serial port."""
+    p=dict(profile,encoder=profile.get('beam_baseline_encoder','bit_feedback_uart_v1'))
+    enc=LiveEncoder(p);baud=p['baud'];n=int(len(source)/FS*baud/10);frame=0;index=0;records=[];parts=[bytearray() for _ in segments]
+    bounds=[(round(s['start_s']*baud/10),round(s['end_s']*baud/10)) for s in segments]
+    while frame<n:
+        if cancel_check and cancel_check():raise InterruptedError('Beam编码已取消')
+        while index<len(bounds) and frame>=bounds[index][1]:index+=1
+        active=index<len(bounds) and frame>=bounds[index][0]
+        boundary=(bounds[index][1] if active else bounds[index][0]) if index<len(bounds) else n
+        count=min(2048,n-frame,max(1,boundary-frame));gain=enc.gain;carrier=enc.carrier
+        data,_=enc.block(source,frame,count,profile['beam_volume'],active,correction)
+        if data:
+            parts[index].extend(data);records.append(dict(start=frame,frames=count,gain_start=gain,gain_end=profile['beam_volume'],carrier_start=carrier))
+        frame+=count
+    result=[dict(s,data=bytes(data)) for s,data in zip(segments,parts) if data]
+    return result,LiveTargetPlan(source,correction,profile,records)
+
+
+def beam_ab_preview(doc,fit_path,seconds=.25):
+    """Same stored reference/baseline/bytes, same gain. Preview is explicitly time-limited."""
+    from ..beam_model import load_model
+    from ..beam import command_block
+    from .._beam_kernels import trajectory,reference
+    if doc.beam_pcm is None or doc.baseline_segments is None:raise ValueError('请先完成Beam离线编码')
+    model=load_model(fit_path,doc.profile['baud']);baud=model.baud
+    if model.model_hash!=doc.metadata['beam']['model_hash']:raise ValueError('模型已改变，请重新编码')
+    n=min(int(seconds*baud/10),int(doc.duration*baud/10));active=np.zeros(n,bool)
+    chosen=np.full(n,256,np.uint16);baseline=np.full(n,256,np.uint16);command=np.zeros(n*10)
+    plan=LiveTargetPlan(doc.beam_pcm,doc.quadratic_correction,doc.profile,doc.metadata['beam']['live_target_blocks'])
+    for own,old in zip(doc.segments,doc.baseline_segments):
+        start=round(own['start_s']*baud/10);end=start+len(own['data']);count=max(0,min(end,n)-start)
+        if not count:continue
+        chosen[start:start+count]=np.frombuffer(own['data'],np.uint8)[:count]
+        baseline[start:start+count]=np.frombuffer(old['data'],np.uint8)[:count];active[start:start+count]=True
+        command[start*10:(start+count)*10]=plan.command(start,count)
+    g=np.vstack((model.g,np.zeros((1,6))));q=np.vstack((model.q,np.zeros((1,10))))
+    current,_=trajectory(chosen,model.F,g,model.H,q,np.zeros(6));old,_=trajectory(baseline,model.F,g,model.H,q,np.zeros(6))
+    target,_=reference(command,model.bit_F,model.bit_g,model.half_F,model.half_g,np.zeros(6))
+    ff=np.fft.rfftfreq(n*10,1/baud);win=np.hanning(n*10);spectra={}
+    scale=5000/(model.parameters[0]+56)
+    for name,values in (('Beam',current),('原有',old),('目标',target)):
+        y=values.ravel()*scale;spectra[name]=abs(np.fft.rfft((y-y.mean())*win))*2/win.sum()
+    t=(np.arange(n*10)+.5)/baud;use=t>max(0,t[-1]-.020);step=max(1,int(np.sum(use)/5000))
+    return dict(time_s=t[use][::step],current_mA=current.ravel()[use][::step]*scale,
+        baseline_mA=old.ravel()[use][::step]*scale,target_mA=target.ravel()[use][::step]*scale,
+        frequency_Hz=ff[ff<=10000],spectra={k:v[ff<=10000] for k,v in spectra.items()},
+        diagnostics=doc.metadata['beam'],preview_seconds=n*10/baud,
+        note='Same stored PCM, gain, model and initial state; bit-center spectrum preview, not microphone data')
+
+
 def fit_recording(reference,capture,prior_profile,fit_path):
     prior,_=electrical_equalizer(fit_path)
     result=fit_acoustic_response(reference,capture,prior_response_db=-prior)
@@ -160,7 +300,10 @@ def export_document(doc,folder,volume=1.):
     """The JSON schedule is necessary: concatenated BIN alone loses actual rests."""
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
     pcm=(doc.base_processed*volume+doc.quadratic_correction*volume**2) if doc.quadratic_correction is not None else doc.processed*volume
-    segments,info=encode_pcm(pcm,baud=doc.profile['baud'],bias=doc.profile['bias'],
+    if doc.profile['encoder'].startswith('beam_'):
+        if abs(volume-doc.profile['beam_volume'])>1e-9:raise ValueError('Beam导出音量与预计算不一致，请重新编码')
+        segments=doc.segments;info=doc.metadata['encoding']
+    else:segments,info=encode_pcm(pcm,baud=doc.profile['baud'],bias=doc.profile['bias'],
                             amplitude=doc.profile['amplitude'],method=doc.profile.get('encoder','bit_feedback_uart_v1'),
                             continuous=doc.profile.get('continuous_carrier',False),soft_edges=doc.profile.get('soft_carrier_edges',False),
                             edge_model=doc.profile.get('edge_model'))

@@ -1,46 +1,37 @@
 # Workspace collaboration
 
-Prefer dedicated APIs, SDKs and official CLIs. Use local file/command tools for
-code, builds and Git; UI automation is for actual interface verification.
+Prefer dedicated APIs, SDKs and official CLIs. Use local file and command tools
+for code, builds and Git; UI automation is for interface verification.
 
-## Active ownership (coordinated 2026-10-29)
+## Ownership and concurrent work
 
-- Stable desktop release / Git / publication: primary maintenance chat.
-- `优化 UART 8N1 音频编码`: Beam/MPC integration; owns
-  `research/beam_integration/`, `src/uart_buzzer/beam*.py`, `_beam_kernels.py`,
-  Beam tests and the coordinated minimal desktop app/cache/devices/engine edits.
-- `研究负载感知 UART 编码器`: owns `research/generative_uart/` and
-  `results/generative_uart/<run>/`; previous `research/differentiable_uart/`
-  is frozen reference evidence.
+- The project coordinator owns release review, Git policy and shared interfaces.
+- The application maintainer owns production source, product tests, build tools,
+  runtime assets and desktop integration. Research findings enter production
+  through this maintainer after review.
+- Researchers write separate research directories and result runs. They do not
+  overwrite production files or another researcher's files.
+- Frozen measurements, model snapshots and experiment records remain read-only.
 
-Keep current paths, virtual environments, locks and processes intact. Do not
-move research into a worktree without its owner's explicit coordination. Do not
-overwrite another owner's files. Coordinate shared-file changes first. Use a
-distinct output directory per experiment; frozen inputs are read-only.
+Use one writer per mutable file. Coordinate shared changes before writing. Keep
+existing paths, environments, locks and running experiments intact. Do not move
+research or remove another process's locks as workspace cleanup.
 
-## Git discipline
+## Git and release discipline
 
-The initial public `main` uses released 1.3.1 source, while this working directory
-may already contain unfinished Beam changes. These differences are intentional.
-Never use reset/checkout/restore/stash/clean to make this checkout appear clean.
-Never use broad `git add .` for publication.
+Use explicit reviewed file lists. Never use reset, restore, stash or clean to
+discard another contributor's work, or broad `git add .` for a public release.
+An active local research checkout can intentionally contain unpublished work.
+Prefer isolated feature branches or coordinated worktrees for independent work.
 
-The publication coordinator owns root Git changes during initial upload. Later,
-agree explicit file lists and commit boundaries before committing in this shared
-checkout. Prefer coordinated worktrees for future independent work. Research
-implementation/tests and GUI integration should be separate commits. Do not
-change the stable encoder default to an unvalidated candidate.
+Publish only reviewed original code, portable tests, licensed dependencies and
+de-identified documentation. Release binaries belong in GitHub Releases, not
+Git history. Keep user music, captures, playlists, caches, converted payloads,
+credentials, virtual environments, downloaded papers, model downloads and raw
+research results private unless separately reviewed and authorized.
 
-## Public content
-
-MIT covers project-original code. Preserve third-party notices and licenses.
-Do not stage local audio, recordings, personal playlists, credentials, virtual
-environments, converted payloads, raw results, papers, downloaded source archives
-or research deliverable ZIPs. Accessibility is not redistribution permission.
-
-Review an explicit allowlist and staged content before public pushes. Only
-owner-approved, de-identified, independently authored research files may be added
-later. Release binaries belong in GitHub Releases, not Git history.
-
-Separate hardware playback from offline tests. Load models predict coil current,
-not calibrated SPL. Test an isolated snapshot while shared source is being edited.
+MIT covers project-original code and original fixtures, not third-party files.
+Preserve upstream notices, including Numba/LLVM and Qt licensing requirements.
+The load model predicts electrical current; it is not calibrated sound pressure.
+Separate offline tests from hardware playback, and never open devices as an
+automatic consequence of running tests or starting the desktop application.

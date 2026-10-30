@@ -3,5 +3,12 @@
   "nonlinear.py": "77199a40f512726cbddc31c2ad860929fd94d115694b7526c0efab44693d9152",
   "uart_codec.py": "049d6435cc09c88664d59af8a62b0825652c5e6f1105eeacbe470b1db929c92a",
   "impedance.py": "2d662cb759c2759a5d79e5687afa53d92b666391c23bf23d171e2a300e7fa08a",
-  "engine.py": "2de8e70deb7adafb4c3ad0efda636e96bcaae17197e6a55ad16561cce4809a3a"
+  "engine.py": "6b8a9d8d0e977c30f368cf7fa0b5269d972c3f2d38b14e4e7267cd8dcd3637e4",
+  "beam.py": "4ba398b2581ee9c97135a53d9a356bb773b2ae8b8c7ec55546f5b4334dfffb84",
+  "beam_model.py": "63812cd3e55d4082efdaa01881e121beb2111313ca188b1b0e3d6b41a834c039",
+  "_beam_kernels.py": "0e32e3ea928fd3607ef8a503432502eb11544789f5f6a39141630132b84f5b73",
+  "numba_selector_dependency": {
+    "numba_version": "0.62.1",
+    "arraymath_sha256": "694eabf5ab6e67c4983fc5044494260f0f84714877af3c0090d44e8d0d133db5"
+  }
 }

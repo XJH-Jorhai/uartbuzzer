@@ -1,4 +1,2 @@
-UART Audio Studio 1.3.1
-Built with Python, NumPy, SciPy, PySide6/Qt, pyqtgraph, pyserial and sounddevice.
-Qt/PySide6: LGPLv3 (or commercial); source modifications and third-party licenses included with the portable distribution.
-Bundled measurement-derived model and relative music profile are specific to the tested hardware.
+UART Audio Studio 1.4.1
+Includes Python, NumPy, SciPy, PySide6/Qt, pyqtgraph, pyserial, sounddevice, Numba and LLVM/llvmlite. See bundled licenses.

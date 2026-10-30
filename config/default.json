@@ -2,7 +2,10 @@
   "status": "initial_analysis_only",
   "voltage_v": 5,
   "resistance_ohm": 42,
-  "resistance_range_ohm": [37, 47],
+  "resistance_range_ohm": [
+    37,
+    47
+  ],
   "resonance_hz": 2000,
   "inductance_h": null,
   "thermal_resistance_k_per_w": null,

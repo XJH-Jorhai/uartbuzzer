@@ -10,5 +10,4 @@ DCR readings, not songs or microphone recordings.
 | fine.csv | 2026-10-28 20:23:06 fine resonance sweep |
 | dcr.csv | 2026-10-28 20:22:16 repeated DC resistance |
 
-Column names and numeric values are preserved. Historical timestamped copies
-remain local in `results/th2851/`; no original local files were moved.
+Column names and numeric values are preserved. No songs or microphone captures are included.

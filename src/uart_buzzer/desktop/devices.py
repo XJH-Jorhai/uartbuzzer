@@ -1,5 +1,7 @@
 """Serial playback and microphone ownership, independent of Qt widgets."""
 from collections import deque
+import copy
+from dataclasses import replace
 from datetime import datetime
 import json
 from pathlib import Path
@@ -14,6 +16,7 @@ from scipy.io import wavfile
 from .engine import LiveEncoder,COUNTS
 from ..music import FS
 from .transport import SerialWriter
+from .song_calibration import freeze_recording_context,file_hash
 
 
 def serial_devices():
@@ -107,7 +110,8 @@ class SerialLink:
 class Playback:
     """Bounded serial queue; live gain ramps and mute never enqueue zero bytes."""
     def __init__(self,link,document,mic,folder,volume=1.,record=False,telemetry=None):
-        self.link=link;self.doc=document;self.mic=mic;self.folder=Path(folder)
+        self.link=link;self.doc=replace(document,profile=copy.deepcopy(document.profile),metadata=copy.deepcopy(document.metadata));self.mic=mic;self.folder=Path(folder)
+        self.calibration_context=freeze_recording_context(self.doc) if record else None
         self.volume=volume;self.muted=False;self.paused=False;self.stop_event=threading.Event()
         self.record=record;self.telemetry=telemetry;self.last_recording=None;self.any_pause=False
         self.volume_events=[]
@@ -128,7 +132,11 @@ class Playback:
         if not self.link.connected:raise RuntimeError('请先连接串口')
         self.folder.mkdir(parents=True,exist_ok=True)
         baud=self.doc.profile['baud'];self.link.port.baudrate=baud
-        encoder=LiveEncoder(self.doc.profile);n=int(self.doc.duration*baud/10)
+        if self.doc.profile.get('encoder','').startswith('beam_'):
+            from .engine import PrecomputedEncoder
+            encoder=PrecomputedEncoder(self.doc)
+        else:encoder=LiveEncoder(self.doc.profile)
+        n=int(self.doc.duration*baud/10)
         bounds=[(round(s['start_s']*baud/10),round(s['end_s']*baud/10)) for s in self.doc.segments]
         frame=0;segment=0;written=0;was_idle=True;owns_record=False;last_gain=None
         record_offset=0.;last_emit=0.;error=None;start=None;paused_time=0.;late_max=0.;pending_decoded=[];timer_active=False
@@ -211,6 +219,7 @@ class Playback:
                           maximum_pending_writes=writer.maximum_pending,
                           record_source_start_s=record_offset,physical_wire_timing_measured=False,
                           reconstruction_is_digital=True)
+            metadata['calibration_context']=copy.deepcopy(self.calibration_context)
             metadata['predistortion']=self.doc.metadata.get('predistortion',dict(enabled=False))
             if owns_record:
                 time.sleep(.15)
@@ -227,6 +236,8 @@ class Playback:
                 ref*=envelope
                 if self.doc.quadratic_correction is not None:ref+=self.doc.quadratic_correction*envelope**2
                 wavfile.write(self.folder/'reference_processed.wav',FS,ref)
+                metadata['calibration_reference_sha256']=file_hash(self.folder/'reference_processed.wav')
+                metadata['calibration_capture_sha256']=file_hash(self.last_recording)
             (self.folder/'playback.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding='utf-8')
         if error:raise RuntimeError(error)
         return dict(position_s=frame*10/baud,bytes=written,recording=str(self.last_recording) if self.last_recording else None,
